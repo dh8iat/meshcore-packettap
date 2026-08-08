@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Captures / runtime data
+packettap_capture.bin
+packettap_capture.log
+packettap_stream.bin
+*.log
+
+# Backups
+*.zip
+
+# Local/private configuration
+public_channel_keys.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
