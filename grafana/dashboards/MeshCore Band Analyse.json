@@ -1,4 +1,83 @@
 {
+  "__inputs": [
+    {
+      "name": "DS_QUESTDB-QUESTDB-DATASOURCE",
+      "label": "questdb-questdb-datasource",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "questdb-questdb-datasource",
+      "pluginName": "QuestDB"
+    }
+  ],
+  "__elements": {},
+  "__requires": [
+    {
+      "type": "panel",
+      "id": "barchart",
+      "name": "Bar chart",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "bargauge",
+      "name": "Bar gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "geomap",
+      "name": "Geomap",
+      "version": ""
+    },
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "12.3.0"
+    },
+    {
+      "type": "panel",
+      "id": "piechart",
+      "name": "Pie chart",
+      "version": ""
+    },
+    {
+      "type": "datasource",
+      "id": "questdb-questdb-datasource",
+      "name": "QuestDB",
+      "version": "0.1.6"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "table",
+      "name": "Table",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "volkovlabs-echarts-panel",
+      "name": "Business Charts",
+      "version": "7.2.5"
+    }
+  ],
   "annotations": {
     "list": [
       {
@@ -18,13 +97,13 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 6,
+  "id": null,
   "links": [],
   "panels": [
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -94,7 +173,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -117,7 +196,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -174,7 +253,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -197,7 +276,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -255,7 +334,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -278,7 +357,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -335,7 +414,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -358,7 +437,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -415,7 +494,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -438,7 +517,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -499,7 +578,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -522,7 +601,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -579,7 +658,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -602,11 +681,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
-      },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "gridPos": {
         "h": 4,
@@ -660,7 +735,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n    ts AS start_time,\r\n    ts + CAST(airtime_ms * 1000 AS LONG) AS end_time,\r\n    airtime_ms,\r\n    payload_type,\r\n    repeater,\r\n    payload_route_type\r\nFROM mc_rx\r\nWHERE\r\n    $__timeFilter(ts)\r\n    AND airtime_ms IS NOT NULL\r\nORDER BY ts\r\nLIMIT 50000",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Kanalbelegung (Airtime)",
@@ -669,11 +748,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
-      },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": []
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "gridPos": {
         "h": 9,
@@ -727,7 +802,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n    ts AS start_time,\r\n    ts + CAST(airtime_ms * 1000 AS LONG) AS end_time,\r\n    airtime_ms,\r\n    payload_type,\r\n    repeater,\r\n    payload_route_type\r\nFROM mc_rx\r\nWHERE\r\n    $__timeFilter(ts)\r\n    AND airtime_ms IS NOT NULL\r\nORDER BY ts\r\nLIMIT 50000",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Kanalbelegung (Airtime) je Repeater",
@@ -736,7 +815,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -795,7 +874,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -818,7 +897,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -898,7 +977,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -921,7 +1000,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1001,7 +1080,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -1024,7 +1103,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1114,7 +1193,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n  hop_count AS \"Hops\",\r\n  count() AS \"Pakete\"\r\nFROM mc_rx\r\nWHERE\r\n  $__timeFilter(ts)\r\n  AND payload_route_type = '1'\r\n  AND hop_count IS NOT NULL\r\nGROUP BY hop_count\r\nORDER BY hop_count;",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "unscoped | Anzahl hops",
@@ -1123,7 +1206,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1183,7 +1266,11 @@
           "queryType": "sql",
           "rawSql": "WITH total AS (\r\n  SELECT count() AS total_count\r\n  FROM mc_rx\r\n  WHERE $__timeFilter(ts)\r\n)\r\n\r\nSELECT\r\n  'Gesamt' AS Kategorie,\r\n  count() AS Pakete,\r\n  100.0 AS Prozent\r\nFROM mc_rx\r\nWHERE $__timeFilter(ts)\r\n\r\nUNION ALL\r\n\r\nSELECT\r\n  'Ohne Region' AS Kategorie,\r\n  count() AS Pakete,\r\n  count() * 100.0 / total.total_count AS Prozent\r\nFROM mc_rx\r\nCROSS JOIN total\r\nWHERE $__timeFilter(ts)\r\n  AND payload_route_type = '1'\r\n\r\nUNION ALL\r\n\r\nSELECT\r\n  'Mit Region' AS Kategorie,\r\n  count() AS Pakete,\r\n  count() * 100.0 / total.total_count AS Prozent\r\nFROM mc_rx\r\nCROSS JOIN total\r\nWHERE $__timeFilter(ts)\r\n  AND payload_route_type IN ('0','3')\r\n\r\nUNION ALL\r\n\r\nSELECT\r\n  'Mit Region #europe' AS Kategorie,\r\n  count() AS Pakete,\r\n  count() * 100.0 / total.total_count AS Prozent\r\nFROM mc_rx\r\nCROSS JOIN total\r\nWHERE $__timeFilter(ts)\r\n  AND payload_route_type IN ('0','3')\r\n  AND region = '#europe'\r\n\r\nUNION ALL\r\n\r\nSELECT\r\n  'Mit Region #de' AS Kategorie,\r\n  count() AS Pakete,\r\n  count() * 100.0 / total.total_count AS Prozent\r\nFROM mc_rx\r\nCROSS JOIN total\r\nWHERE $__timeFilter(ts)\r\n  AND payload_route_type IN ('0','3')\r\n  AND region = '#de';",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Packete & Regionen",
@@ -1192,7 +1279,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1269,7 +1356,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -1292,7 +1379,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1416,7 +1503,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -1439,7 +1526,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1521,7 +1608,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -1544,7 +1631,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1625,7 +1712,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -1648,7 +1735,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1768,7 +1855,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -1791,7 +1878,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -1872,7 +1959,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -1895,7 +1982,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2057,7 +2144,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -2076,7 +2163,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -2099,7 +2186,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2192,7 +2279,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n  r.ts AS time,\r\n  r.frame_bytes AS \" \",\r\n  r.txt_msg_src_hash || '→' || r.txt_msg_dest_hash AS metric\r\nFROM mc_rx r\r\nJOIN (\r\n  SELECT\r\n    txt_msg_src_hash,\r\n    txt_msg_dest_hash,\r\n    COUNT(*) AS cnt\r\n  FROM mc_rx\r\n  WHERE payload_type = 'TEXT_MSG'\r\n    AND txt_msg_src_hash IS NOT NULL\r\n    AND txt_msg_dest_hash IS NOT NULL\r\n    AND $__timeFilter(ts)\r\n  GROUP BY txt_msg_src_hash, txt_msg_dest_hash\r\n  ORDER BY cnt DESC\r\n  LIMIT 10\r\n) t\r\nON r.txt_msg_src_hash = t.txt_msg_src_hash\r\nAND r.txt_msg_dest_hash = t.txt_msg_dest_hash\r\nWHERE r.payload_type = 'TEXT_MSG'\r\n  AND r.txt_msg_src_hash IS NOT NULL\r\n  AND r.txt_msg_dest_hash IS NOT NULL\r\n  AND $__timeFilter(r.ts)\r\nORDER BY time;",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "TXT-MSG Pakete",
@@ -2201,7 +2292,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2267,7 +2358,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n  route_type,\r\n  sum(cnt) AS cnt\r\nFROM (\r\n  SELECT\r\n    CASE\r\n      WHEN payload_route_type IN ('0','1') THEN 'Flood'\r\n      WHEN payload_route_type IN ('2','3') THEN 'Direct'\r\n      ELSE 'Unknown'\r\n    END AS route_type,\r\n    count() AS cnt\r\n  FROM mc_rx\r\n  WHERE payload_type = 'TEXT_MSG'\r\n    AND payload_route_type IS NOT NULL\r\n    AND $__timeFilter(ts)\r\n  GROUP BY payload_route_type\r\n)\r\nGROUP BY route_type\r\nORDER BY cnt DESC;",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Route Type (TXT-MSG)",
@@ -2276,7 +2371,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2334,7 +2429,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -2357,7 +2452,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2415,7 +2510,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -2438,7 +2533,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": ""
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2486,7 +2581,11 @@
           "editorMode": "code",
           "format": 1,
           "rawSql": "SELECT\n  grp_txt_sender_name,\n  count() AS packets\nFROM mc_rx\nWHERE\n  payload_type = 'GRP_TXT'\n  AND grp_txt_sender_name IS NOT NULL\n  AND $__timeFilter(ts)\nGROUP BY grp_txt_sender_name\nORDER BY packets DESC\nLIMIT 20",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Top GRP_TXT Sendernamen",
@@ -2495,7 +2594,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2665,7 +2764,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n    max(ts) AS \"Zeit\",\r\n    count() AS \"Gehört\",\r\n    string_agg(repeater, '|') AS \"Letzte Hops\",\r\n    channel AS \"Channel\",\r\n    region AS \"Region\",\r\n    grp_txt_sender_name AS \"Absender\",\r\n    grp_txt_body AS \"Nachricht\",\r\n    packet_payload_sha256 AS hash\r\nFROM mc_rx\r\nWHERE\r\n    payload_type = 'GRP_TXT'\r\n    AND packet_payload_sha256 IS NOT NULL\r\n    AND $__timeFilter(ts)\r\nGROUP BY\r\n    packet_payload_sha256,\r\n    channel,\r\n    region,\r\n    grp_txt_sender_name,\r\n    grp_txt_body\r\nORDER BY max(ts) DESC\r\nLIMIT 1000",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Node RX-Log GRP_TXT",
@@ -2674,7 +2777,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": ""
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2728,7 +2831,11 @@
           "editorMode": "code",
           "format": 1,
           "rawSql": "SELECT\n  channel,\n  region,\n  count() AS packets\nFROM mc_rx\nWHERE\n  payload_type = 'GRP_TXT'\n  AND region IS NOT NULL\n  AND channel IS NOT NULL\n  AND $__timeFilter(ts)\nGROUP BY channel, region\nORDER BY channel, packets DESC",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Channel → Region Kombinationen",
@@ -2737,7 +2844,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": ""
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -2785,7 +2892,11 @@
           "editorMode": "code",
           "format": 1,
           "rawSql": "SELECT\n  region,\n  channel,\n  count() AS packets\nFROM mc_rx\nWHERE\n  payload_type = 'GRP_TXT'\n  AND region IS NOT NULL\n  AND channel IS NOT NULL\n  AND $__timeFilter(ts)\nGROUP BY region, channel\nORDER BY region, packets DESC",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Region → Channel Kombinationen",
@@ -2799,13 +2910,10 @@
   "templating": {
     "list": [
       {
-        "current": {
-          "text": "48",
-          "value": "48"
-        },
+        "current": {},
         "datasource": {
           "type": "questdb-questdb-datasource",
-          "uid": ""
+          "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
         },
         "definition": "SELECT DISTINCT repeater FROM mc_rx",
         "includeAll": false,
@@ -2839,5 +2947,6 @@
   "timezone": "browser",
   "title": "MeshCore Band Analyse",
   "uid": "adnk7ml",
-  "version": 13
+  "version": 13,
+  "weekStart": ""
 }

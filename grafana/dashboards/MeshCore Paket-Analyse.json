@@ -1,4 +1,41 @@
 {
+  "__inputs": [
+    {
+      "name": "DS_QUESTDB-QUESTDB-DATASOURCE",
+      "label": "questdb-questdb-datasource",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "questdb-questdb-datasource",
+      "pluginName": "QuestDB"
+    }
+  ],
+  "__elements": {},
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "12.3.0"
+    },
+    {
+      "type": "datasource",
+      "id": "questdb-questdb-datasource",
+      "name": "QuestDB",
+      "version": "0.1.6"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "table",
+      "name": "Table",
+      "version": ""
+    }
+  ],
   "annotations": {
     "list": [
       {
@@ -18,13 +55,13 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 5,
+  "id": null,
   "links": [],
   "panels": [
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -87,7 +124,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n  payload_type\r\nFROM mc_rx\r\nWHERE packet_payload_sha256 = '${hash}'\r\nLIMIT 1",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Payload Typ",
@@ -96,7 +137,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -159,7 +200,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n  grp_txt_sender_name AS \"Sender\"\r\nFROM mc_rx\r\nWHERE packet_payload_sha256 = '${hash}'\r\nLIMIT 1",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Sender",
@@ -168,7 +213,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -231,7 +276,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n  coalesce(channel, 'kein Channel') AS \"Channel\"\r\nFROM mc_rx\r\nWHERE packet_payload_sha256 = '${hash}'\r\nLIMIT 1",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Cannel",
@@ -240,7 +289,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -303,7 +352,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n  region AS \"Region\"\r\nFROM mc_rx\r\nWHERE packet_payload_sha256 = '${hash}'\r\nLIMIT 1",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Region",
@@ -312,7 +365,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -372,7 +425,11 @@
           "queryType": "sql",
           "rawSql": "SELECT\r\n  grp_txt_body AS \"Nachricht\"\r\nFROM mc_rx\r\nWHERE packet_payload_sha256 = '${hash}'\r\nLIMIT 1",
           "refId": "A",
-          "selectedFormat": 2
+          "selectedFormat": 2,
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
+          }
         }
       ],
       "title": "Nachricht",
@@ -381,7 +438,7 @@
     {
       "datasource": {
         "type": "questdb-questdb-datasource",
-        "uid": "bf3fr1dzim4u8f"
+        "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -510,7 +567,7 @@
         {
           "datasource": {
             "type": "questdb-questdb-datasource",
-            "uid": "bf3fr1dzim4u8f"
+            "uid": "${DS_QUESTDB-QUESTDB-DATASOURCE}"
           },
           "format": 1,
           "meta": {
@@ -538,18 +595,18 @@
     "list": [
       {
         "current": {
-          "text": "",
-          "value": ""
+          "text": "9ffae49de88ae79f",
+          "value": "9ffae49de88ae79f"
         },
         "name": "hash",
         "options": [
           {
             "selected": true,
-            "text": "",
-            "value": ""
+            "text": "9ffae49de88ae79f",
+            "value": "9ffae49de88ae79f"
           }
         ],
-        "query": "",
+        "query": "9ffae49de88ae79f",
         "type": "textbox"
       }
     ]
@@ -562,5 +619,6 @@
   "timezone": "browser",
   "title": "MeshCore Paket-Analyse",
   "uid": "adtsdcx",
-  "version": 6
+  "version": 6,
+  "weekStart": ""
 }
