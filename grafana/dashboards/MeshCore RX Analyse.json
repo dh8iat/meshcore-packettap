@@ -1,0 +1,2495 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 4,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "index": 1,
+                  "text": "Getrennt"
+                },
+                "1": {
+                  "index": 0,
+                  "text": "Verbunden"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "dark-red",
+                "value": 0
+              },
+              {
+                "color": "semi-dark-green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 35,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 20
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT tcp_connected AS value\r\nFROM mc_companion_info\r\nORDER BY ts DESC\r\nLIMIT 1",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "TCP Status",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#ffffff",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 6,
+        "x": 0,
+        "y": 2
+      },
+      "id": 37,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/^value$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 20
+        },
+        "textMode": "value",
+        "wideLayout": false
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT \r\n  cast(node_name as varchar) AS value\r\nFROM mc_companion_info\r\nWHERE node_name IS NOT NULL\r\n  AND model IS NOT NULL\r\nORDER BY ts DESC\r\nLIMIT 1",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "TCP-Node",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "text",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "m"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 4,
+        "x": 6,
+        "y": 2
+      },
+      "id": 36,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 20
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  (now() - ts) / 60000000 AS minutes\r\nFROM mc_companion_info\r\nORDER BY ts DESC\r\nLIMIT 1",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Verbunden seit",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#ffffff",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 10,
+        "y": 2
+      },
+      "id": 30,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/^value$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 16
+        },
+        "textMode": "value",
+        "wideLayout": false
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT \r\n  cast(model as varchar) AS value\r\nFROM mc_companion_info\r\nWHERE node_name IS NOT NULL\r\n  AND model IS NOT NULL\r\nORDER BY ts DESC\r\nLIMIT 1",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Model",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "text",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 13,
+        "y": 2
+      },
+      "id": 32,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/^value$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 16
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT cast(firmware as varchar) AS value\r\nFROM mc_companion_info\r\nWHERE firmware IS NOT NULL\r\nORDER BY ts DESC\r\nLIMIT 1",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Firmware",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "#EAB839",
+                "value": -109
+              },
+              {
+                "color": "red",
+                "value": -100
+              }
+            ]
+          },
+          "unit": "dB"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 16,
+        "y": 2
+      },
+      "id": 34,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "/^value$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 20
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT noise_floor AS value\r\nFROM mc_companion_info\r\nWHERE noise_floor IS NOT NULL\r\nORDER BY ts DESC\r\nLIMIT 1",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Noise Floor",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "text",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 3,
+        "x": 19,
+        "y": 2
+      },
+      "id": 40,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 16
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT count() AS kontakte\r\nFROM mc_contacts;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Kontakte",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#c1c1f4",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 39,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^value$/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 26
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  left(public_key, length('$repeater')) ||\r\n  ' • ' ||\r\n  coalesce(adv_name, '') AS value\r\nFROM mc_contacts\r\nWHERE public_key LIKE '$repeater%'\r\n\r\nUNION ALL\r\n\r\nSELECT '$repeater' AS value\r\nFROM long_sequence(1)\r\n\r\nLIMIT 1;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Ausgewählter Repeater",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "max": 10,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "#EAB839",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 8
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 0,
+        "y": 6
+      },
+      "id": 18,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "WITH window_bounds AS (\r\n  SELECT\r\n    min(ts) AS ts_min,\r\n    max(ts) AS ts_max\r\n  FROM mc_rx\r\n  WHERE\r\n    airtime_ms IS NOT NULL\r\n    AND $__timeFilter(ts)\r\n    AND repeater LIKE '${repeater}%'\r\n),\r\nrepeater_airtime AS (\r\n  SELECT\r\n    sum(airtime_ms) AS airtime_ms_sum\r\n  FROM mc_rx\r\n  WHERE\r\n    airtime_ms IS NOT NULL\r\n    AND $__timeFilter(ts)\r\n    AND repeater LIKE '${repeater}%'\r\n)\r\nSELECT\r\n  round(\r\n    100.0 * r.airtime_ms_sum /\r\n    greatest((w.ts_max - w.ts_min) / 1000.0, 1.0),\r\n    4\r\n  ) AS duty_cycle_percent\r\nFROM repeater_airtime r\r\nCROSS JOIN window_bounds w;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Duty Cycle",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "text",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 5,
+        "y": 6
+      },
+      "id": 20,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  count_distinct(prev_hop) AS neighbors\r\nFROM mc_rx\r\nWHERE\r\n  repeater LIKE '${repeater}%'\r\n  AND prev_hop IS NOT NULL\r\n  AND $__timeFilter(ts)",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Anzahl Nachbarn (Repeater & Nodes)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "text",
+            "mode": "fixed"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 11,
+        "y": 6
+      },
+      "id": 21,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  count_distinct(sender_node) AS senders\r\nFROM mc_rx\r\nWHERE\r\n  $__timeFilter(ts)\r\n  AND repeater LIKE '${repeater}%'\r\n  AND sender_node IS NOT NULL",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Anzahl der Sender",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 7,
+        "x": 15,
+        "y": 6
+      },
+      "id": 22,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 1,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "WITH hash_counts AS (\r\n  SELECT\r\n    path_hash_size,\r\n    count() AS packets\r\n  FROM mc_rx\r\n  WHERE $__timeFilter(ts)\r\n    AND repeater LIKE '${repeater}%'\r\n  GROUP BY path_hash_size\r\n),\r\ntotal AS (\r\n  SELECT sum(packets) AS total_packets FROM hash_counts\r\n)\r\nSELECT\r\n  concat(cast(path_hash_size as string), ' byte') AS hash_size,\r\n  round(100.0 * packets / total_packets, 1) AS percent\r\nFROM hash_counts\r\nCROSS JOIN total\r\nORDER BY percent DESC;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Hash Size",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 14,
+        "x": 0,
+        "y": 12
+      },
+      "id": 17,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        },
+        "xField": "ts",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  ts,\r\n  count() AS packets\r\nFROM mc_rx\r\nWHERE\r\n  repeater LIKE '${repeater}%'\r\n  AND $__timeFilter(ts)\r\nSAMPLE BY 1h",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Pakete pro Stunde",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 12
+      },
+      "id": 27,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        },
+        "xField": "hop",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n    (hop_count + 1) AS hop,\r\n    count(*) AS packets\r\nFROM mc_rx\r\nWHERE $__timeFilter(ts)\r\n  AND repeater LIKE '${repeater}%'\r\nGROUP BY hop\r\nORDER BY hop;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Hop Verteilung",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "green",
+            "mode": "fixed"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "REQ"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "RESPONSE"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ANON_REQ"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "GRP_TXT"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 19,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "WITH totals AS (\r\n  SELECT count() AS total_count\r\n  FROM mc_rx\r\n  WHERE\r\n    repeater LIKE '${repeater}%'\r\n    AND $__timeFilter(ts)\r\n)\r\nSELECT\r\n  sum(CASE WHEN payload_type = 'REQ' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS REQ,\r\n  sum(CASE WHEN payload_type = 'ANON_REQ' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS ANON_REQ,\r\n  sum(CASE WHEN payload_type = 'RESPONSE' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS RESPONSE,\r\n  sum(CASE WHEN payload_type = 'TEXT_MSG' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS TEXT_MSG,\r\n  sum(CASE WHEN payload_type = 'PATH' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS PATH,\r\n  sum(CASE WHEN payload_type = 'ACK' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS ACK,\r\n  sum(CASE WHEN payload_type = 'GRP_TXT' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS GRP_TXT,\r\n  sum(CASE WHEN payload_type = 'CONTROL' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS CONTROL,\r\n  sum(CASE WHEN payload_type = 'ADVERT' THEN 1 ELSE 0 END) * 100.0 / t.total_count AS ADVERT\r\nFROM mc_rx\r\nCROSS JOIN totals t\r\nWHERE\r\n  repeater LIKE '${repeater}%'\r\n  AND $__timeFilter(ts);",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Payload Typen",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "id": 26,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "text": {
+          "valueSize": 16
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n    payload_type,\r\n    count(*) AS packets\r\nFROM mc_rx\r\nWHERE $__timeFilter(ts)\r\n  AND repeater LIKE '${repeater}%'\r\nGROUP BY payload_type\r\nORDER BY packets DESC;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Payload Typen",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineWidth": 1,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "dtdurations"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 17,
+        "x": 0,
+        "y": 28
+      },
+      "id": 24,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.97,
+        "fullHighlight": false,
+        "groupWidth": 0.7,
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "auto",
+        "showValue": "never",
+        "stacking": "normal",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        },
+        "xField": "neighbor",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "WITH top_neighbors AS (\r\n  SELECT\r\n    prev_hop,\r\n    sum(airtime_ms) AS total_airtime_ms\r\n  FROM mc_rx\r\n  WHERE\r\n    $__timeFilter(ts)\r\n    AND repeater LIKE '${repeater}%'\r\n    AND prev_hop IS NOT NULL\r\n    AND airtime_ms IS NOT NULL\r\n  GROUP BY prev_hop\r\n  ORDER BY total_airtime_ms DESC\r\n  LIMIT 10\r\n)\r\n\r\nSELECT\r\n  mc_rx.prev_hop || '*' AS neighbor,\r\n\r\n  round(sum(CASE WHEN mc_rx.payload_type = 'REQ' THEN mc_rx.airtime_ms ELSE 0 END) / 1000.0, 2) AS req,\r\n  round(sum(CASE WHEN mc_rx.payload_type = 'ANON_REQ' THEN mc_rx.airtime_ms ELSE 0 END) / 1000.0, 2) AS anon_req,\r\n  round(sum(CASE WHEN mc_rx.payload_type = 'RESPONSE' THEN mc_rx.airtime_ms ELSE 0 END) / 1000.0, 2) AS response,\r\n  round(sum(CASE WHEN mc_rx.payload_type = 'TEXT_MSG' THEN mc_rx.airtime_ms ELSE 0 END) / 1000.0, 2) AS text_msg,\r\n  round(sum(CASE WHEN mc_rx.payload_type = 'PATH' THEN mc_rx.airtime_ms ELSE 0 END) / 1000.0, 2) AS path,\r\n  round(sum(CASE WHEN mc_rx.payload_type = 'ACK' THEN mc_rx.airtime_ms ELSE 0 END) / 1000.0, 2) AS ack,\r\n  round(sum(CASE WHEN mc_rx.payload_type = 'GRP_TXT' THEN mc_rx.airtime_ms ELSE 0 END) / 1000.0, 2) AS grp_txt\r\n\r\nFROM mc_rx\r\n\r\nJOIN top_neighbors\r\n  ON mc_rx.prev_hop = top_neighbors.prev_hop\r\n\r\nWHERE\r\n  $__timeFilter(ts)\r\n  AND mc_rx.repeater LIKE '${repeater}%'\r\n  AND mc_rx.airtime_ms IS NOT NULL\r\n\r\nGROUP BY\r\n  mc_rx.prev_hop,\r\n  top_neighbors.total_airtime_ms\r\n\r\nORDER BY\r\n  top_neighbors.total_airtime_ms DESC",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Top 10 Nachbarn (Nodes) - Airtime",
+      "type": "barchart"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Node"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              },
+              {
+                "id": "custom.width",
+                "value": 50
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Public Key"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Node"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Node ID",
+                    "url": "/d/${__dashboard.uid}/${__dashboard.name}?var-node=${__data.fields.node_key}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "node_key"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom.viz",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 7,
+        "x": 17,
+        "y": 28
+      },
+      "id": 41,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "WITH top_neighbors AS (\r\n  SELECT\r\n    prev_hop,\r\n    sum(airtime_ms) AS total_airtime_ms\r\n  FROM mc_rx\r\n  WHERE\r\n    $__timeFilter(ts)\r\n    AND repeater LIKE '${repeater}%'\r\n    AND prev_hop IS NOT NULL\r\n    AND airtime_ms IS NOT NULL\r\n  GROUP BY prev_hop\r\n  ORDER BY total_airtime_ms DESC\r\n  LIMIT 10\r\n),\r\nmatch_counts AS (\r\n  SELECT\r\n    tn.prev_hop,\r\n    count(mc_contacts.public_key) AS contact_count\r\n  FROM top_neighbors tn\r\n  LEFT JOIN mc_contacts\r\n    ON substring(mc_contacts.public_key, 1, length(tn.prev_hop)) = tn.prev_hop\r\n  GROUP BY tn.prev_hop\r\n)\r\n\r\nSELECT\r\n  tn.prev_hop || '*' AS \"Node\",\r\n  mc_contacts.adv_name AS \"Name\",\r\n  substring(mc_contacts.public_key, 1, 6) || '*' AS \"Public Key\",\r\n  mc_contacts.public_key AS node_key\r\nFROM top_neighbors tn\r\nLEFT JOIN mc_contacts\r\n  ON substring(mc_contacts.public_key, 1, length(tn.prev_hop)) = tn.prev_hop\r\nLEFT JOIN match_counts mc\r\n  ON tn.prev_hop = mc.prev_hop\r\nORDER BY\r\n  tn.total_airtime_ms DESC,\r\n  mc_contacts.adv_name",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Kontakte",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.3,
+            "drawStyle": "bars",
+            "fillOpacity": 72,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 0,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 13,
+        "x": 0,
+        "y": 36
+      },
+      "id": 43,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "format": 0,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  r.ts AS time,\r\n  r.frame_bytes AS \" \",\r\n  r.txt_msg_src_hash || '→' || r.txt_msg_dest_hash AS metric\r\nFROM mc_rx r\r\nJOIN (\r\n  SELECT\r\n    txt_msg_src_hash,\r\n    txt_msg_dest_hash,\r\n    COUNT(*) AS cnt\r\n  FROM mc_rx\r\n  WHERE payload_type = 'TEXT_MSG'\r\n    AND txt_msg_src_hash IS NOT NULL\r\n    AND txt_msg_dest_hash IS NOT NULL\r\n    AND repeater LIKE '${repeater}%'\r\n    AND $__timeFilter(ts)\r\n  GROUP BY txt_msg_src_hash, txt_msg_dest_hash\r\n  ORDER BY cnt DESC\r\n  LIMIT 10\r\n) t\r\nON r.txt_msg_src_hash = t.txt_msg_src_hash\r\nAND r.txt_msg_dest_hash = t.txt_msg_dest_hash\r\nWHERE r.payload_type = 'TEXT_MSG'\r\n  AND r.txt_msg_src_hash IS NOT NULL\r\n  AND r.txt_msg_dest_hash IS NOT NULL\r\n  AND r.repeater LIKE '${repeater}%'\r\n  AND $__timeFilter(r.ts)\r\nORDER BY time;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "TXT-MSG Pakete",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": [],
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 13,
+        "y": 36
+      },
+      "id": 44,
+      "options": {
+        "displayLabels": [
+          "percent",
+          "name"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "sort": "desc",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  CASE\r\n    WHEN payload_route_type IN ('0','3') THEN 'mit Region'\r\n    WHEN payload_route_type = '1' THEN 'ohne Region'\r\n    WHEN payload_route_type = '2' THEN 'mit Pfad'\r\n    ELSE 'unbekannt'\r\n  END AS route_scope,\r\n\r\n  round(sum(airtime_ms) / 1000.0, 2) AS airtime_seconds\r\n\r\nFROM mc_rx\r\n\r\nWHERE\r\n    $__timeFilter(ts)\r\n    AND repeater LIKE '${repeater}%'\r\n    AND airtime_ms IS NOT NULL\r\n    AND payload_route_type IS NOT NULL\r\n\r\nGROUP BY\r\n    CASE\r\n      WHEN payload_route_type IN ('0','3') THEN 'mit Region'\r\n      WHEN payload_route_type = '1' THEN 'ohne Region'\r\n      WHEN payload_route_type = '2' THEN 'mit Pfad'\r\n      ELSE 'unbekannt'\r\n    END\r\n\r\nORDER BY airtime_seconds DESC;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Route Type",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 7,
+        "x": 17,
+        "y": 36
+      },
+      "id": 42,
+      "options": {
+        "basemap": {
+          "config": {},
+          "name": "Layer 0",
+          "noRepeat": false,
+          "type": "osm-standard"
+        },
+        "controls": {
+          "mouseWheelZoom": true,
+          "showAttribution": true,
+          "showDebug": false,
+          "showMeasure": false,
+          "showScale": false,
+          "showZoom": true
+        },
+        "layers": [
+          {
+            "config": {
+              "showLegend": false,
+              "style": {
+                "color": {
+                  "fixed": "dark-green"
+                },
+                "opacity": 0.8,
+                "rotation": {
+                  "fixed": 0,
+                  "max": 360,
+                  "min": -360,
+                  "mode": "mod"
+                },
+                "size": {
+                  "fixed": 5,
+                  "max": 15,
+                  "min": 2
+                },
+                "symbol": {
+                  "fixed": "img/icons/marker/circle.svg",
+                  "mode": "fixed"
+                },
+                "symbolAlign": {
+                  "horizontal": "center",
+                  "vertical": "center"
+                },
+                "textConfig": {
+                  "fontSize": 12,
+                  "offsetX": 0,
+                  "offsetY": 0,
+                  "textAlign": "center",
+                  "textBaseline": "middle"
+                }
+              }
+            },
+            "location": {
+              "mode": "auto"
+            },
+            "name": "Kontakte",
+            "tooltip": true,
+            "type": "markers"
+          },
+          {
+            "config": {
+              "showLegend": false,
+              "style": {
+                "color": {
+                  "fixed": "dark-red"
+                },
+                "opacity": 1,
+                "rotation": {
+                  "fixed": 0,
+                  "max": 360,
+                  "min": -360,
+                  "mode": "mod"
+                },
+                "size": {
+                  "fixed": 5,
+                  "max": 15,
+                  "min": 2
+                },
+                "symbol": {
+                  "fixed": "img/icons/marker/circle.svg",
+                  "mode": "fixed"
+                },
+                "symbolAlign": {
+                  "horizontal": "center",
+                  "vertical": "center"
+                },
+                "textConfig": {
+                  "fontSize": 12,
+                  "offsetX": 0,
+                  "offsetY": 0,
+                  "textAlign": "center",
+                  "textBaseline": "middle"
+                }
+              }
+            },
+            "filterData": {
+              "id": "byRefId",
+              "options": "B"
+            },
+            "location": {
+              "mode": "auto"
+            },
+            "name": "Selektion",
+            "tooltip": true,
+            "type": "markers"
+          }
+        ],
+        "tooltip": {
+          "mode": "details"
+        },
+        "view": {
+          "allLayers": true,
+          "id": "europe",
+          "lat": 46,
+          "lon": 14,
+          "noRepeat": false,
+          "zoom": 4
+        }
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  adv_name AS name,\r\n  public_key,\r\n  adv_lat AS latitude,\r\n  adv_lon AS longitude\r\nFROM mc_contacts\r\nWHERE\r\n  adv_lat IS NOT NULL\r\n  AND adv_lon IS NOT NULL",
+          "refId": "A",
+          "selectedFormat": 2
+        },
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  adv_name AS name,\r\n  public_key,\r\n  adv_lat AS latitude,\r\n  adv_lon AS longitude\r\nFROM mc_contacts\r\nWHERE\r\n  adv_lat IS NOT NULL\r\n  AND adv_lon IS NOT NULL\r\n  AND public_key = '${node}'",
+          "refId": "B",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Kontakte",
+      "type": "geomap"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 44
+      },
+      "id": 28,
+      "options": {
+        "displayLabels": [
+          "percent",
+          "name"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "sort": "desc",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  region,\r\n  count(*) AS packets\r\nFROM mc_rx\r\nWHERE\r\n  $__timeFilter(ts)\r\n  AND repeater LIKE '${repeater}%'\r\n  AND region IS NOT NULL\r\nGROUP BY region\r\nORDER BY packets DESC;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Regionen",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "bf3fr1dzim4u8f"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 44
+      },
+      "id": 29,
+      "options": {
+        "displayLabels": [
+          "name",
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "sort": "desc",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "bf3fr1dzim4u8f"
+          },
+          "format": 1,
+          "meta": {
+            "builderOptions": {
+              "fields": [],
+              "limit": "",
+              "mode": "list",
+              "timeField": ""
+            }
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT\r\n  channel AS label,\r\n  count(*) AS packets\r\nFROM mc_rx\r\nWHERE\r\n  $__timeFilter(ts)\r\n  AND repeater LIKE '${repeater}%'\r\n  AND channel IS NOT NULL\r\nGROUP BY channel\r\nORDER BY packets DESC, channel;",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Channels",
+      "type": "piechart"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 44
+      },
+      "id": 9,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": 1,
+          "rawSql": "SELECT\n  grp_txt_sender_name,\n  count() AS packets\nFROM mc_rx\nWHERE\n  payload_type = 'GRP_TXT'\n  AND grp_txt_sender_name IS NOT NULL\n  AND $__timeFilter(ts)\nGROUP BY grp_txt_sender_name\nORDER BY packets DESC\nLIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Top GRP_TXT Sendernamen",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 53
+      },
+      "id": 10,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "channel"
+          }
+        ]
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": 1,
+          "rawSql": "SELECT\n  channel,\n  region,\n  count() AS packets\nFROM mc_rx\nWHERE\n  payload_type = 'GRP_TXT'\n  AND region IS NOT NULL\n  AND channel IS NOT NULL\n  AND $__timeFilter(ts)\nGROUP BY channel, region\nORDER BY channel, packets DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Channel → Region Kombinationen",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": ""
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "footer": {
+              "reducers": []
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 53
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.0",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": 1,
+          "rawSql": "SELECT\n  region,\n  channel,\n  count() AS packets\nFROM mc_rx\nWHERE\n  payload_type = 'GRP_TXT'\n  AND region IS NOT NULL\n  AND channel IS NOT NULL\n  AND $__timeFilter(ts)\nGROUP BY region, channel\nORDER BY region, packets DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Region → Channel Kombinationen",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "10s",
+  "schemaVersion": 42,
+  "tags": [
+    "meshcore",
+    "questdb"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "48",
+          "value": "48"
+        },
+        "datasource": {
+          "type": "questdb-questdb-datasource",
+          "uid": ""
+        },
+        "definition": "SELECT DISTINCT repeater FROM mc_rx",
+        "includeAll": false,
+        "label": "Repeater",
+        "name": "repeater",
+        "options": [],
+        "query": "SELECT DISTINCT repeater FROM mc_rx",
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "84a47f9cd4cf49856caa7fbe9bc0044544f27dd47fbb257ab919bf018567b6d3",
+          "value": "84a47f9cd4cf49856caa7fbe9bc0044544f27dd47fbb257ab919bf018567b6d3"
+        },
+        "hide": 2,
+        "name": "node",
+        "options": [],
+        "query": "",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "MeshCore RX Analyse",
+  "uid": "meshcore-rx-analyse-v2",
+  "version": 51
+}
