@@ -276,6 +276,7 @@ async def write_mc_companion_info(
     node_name,
     public_key,
     tcp_connected,
+    node_role=None,
 ) -> None:
     await write_row(
         TABLE_COMPANION_INFO,
@@ -286,6 +287,7 @@ async def write_mc_companion_info(
             "build": build,
             "node_name": node_name,
             "public_key": public_key,
+            "node_role": node_role,
         },
         columns={
             "noise_floor": noise_floor,

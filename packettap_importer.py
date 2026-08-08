@@ -12,14 +12,13 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from mc_db import QuestDBWriter, configure_writer
-from mc_writer import write_decoded_packet
+from mc_writer import write_decoded_packet, write_mc_companion_info
 from meshcore_decoder import decode_mc_rx_record
 
 
 DEFAULT_CAPTURE_FILE = Path("packettap_capture.log")
 DEFAULT_QUESTDB_HOST = "192.168.1.2"
 DEFAULT_QUESTDB_PORT = 9000
-DEFAULT_RECEIVER_CONFIG = Path("receiver_config.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,15 +78,6 @@ def parse_args() -> argparse.Namespace:
             "new records."
         ),
     )
-    parser.add_argument(
-        "--receiver-config",
-        type=Path,
-        default=DEFAULT_RECEIVER_CONFIG,
-        help=(
-            "Receiver identity JSON "
-            f"(default: {DEFAULT_RECEIVER_CONFIG})"
-        ),
-    )
     return parser.parse_args()
 
 
@@ -114,38 +104,6 @@ async def iter_json_lines(
                 break
 
             await asyncio.sleep(0.25)
-
-
-def load_receiver_config(path: Path) -> dict[str, Any]:
-    defaults = {
-        "receiver_id": "ptap01",
-        "receiver_name": "PacketTap Receiver",
-        "receiver_type": "PacketTap",
-        "receiver_version": "1",
-    }
-
-    if not path.is_file():
-        print(f"[WARNUNG] {path} nicht gefunden; verwende Standardwerte.")
-        return defaults
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(
-            f"Receiver-Konfiguration ungültig: {path}: {exc}"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise SystemExit(
-            f"Receiver-Konfiguration muss ein JSON-Objekt sein: {path}"
-        )
-
-    result = dict(defaults)
-    for key in defaults:
-        value = data.get(key)
-        if value is not None and str(value).strip():
-            result[key] = str(value).strip()
-    return result
 
 
 def parse_peer(peer: Any) -> tuple[str | None, int | None]:
@@ -176,15 +134,18 @@ def parse_peer(peer: Any) -> tuple[str | None, int | None]:
 def build_metadata(
     capture_record: dict[str, Any],
     repeater: str | None,
-    receiver_config: dict[str, Any],
 ) -> dict[str, Any]:
+    """Build metadata only from the capture record and CLI overrides.
+
+    Receiver identity is supplied by receiver.py from the PKTH HELLO frame.
+    No local config file is used.
+    """
     metadata = dict(capture_record)
 
     if repeater:
         metadata["repeater"] = repeater
 
     receiver_ip, receiver_port = parse_peer(capture_record.get("peer"))
-    metadata.update(receiver_config)
     metadata["receiver_ip"] = receiver_ip
     metadata["receiver_port"] = receiver_port
     metadata["receiver_time_ns"] = capture_record.get("received_unix_ns")
@@ -227,8 +188,6 @@ async def run_import(args: argparse.Namespace) -> int:
             f"Capture file not found: {args.capture_file}"
         )
 
-    receiver_config = load_receiver_config(args.receiver_config)
-
     writer: QuestDBWriter | None = None
     writer_task: asyncio.Task[None] | None = None
 
@@ -244,6 +203,7 @@ async def run_import(args: argparse.Namespace) -> int:
     imported = 0
     skipped = 0
     invalid = 0
+    seen_receiver_ids: set[str] = set()
 
     try:
         async for line_number, line in iter_json_lines(
@@ -286,8 +246,39 @@ async def run_import(args: argparse.Namespace) -> int:
             metadata = build_metadata(
                 capture_record,
                 args.repeater,
-                receiver_config,
             )
+
+            receiver_id = str(metadata.get("receiver_id") or "").strip()
+            if receiver_id and receiver_id not in seen_receiver_ids:
+                seen_receiver_ids.add(receiver_id)
+                print(
+                    "[NODE] "
+                    f"name={metadata.get('receiver_name')} "
+                    f"model={metadata.get('receiver_type')} "
+                    f"firmware={metadata.get('receiver_version')} "
+                    f"role={metadata.get('node_role')} "
+                    f"public_key={receiver_id}"
+                )
+
+                if not args.dry_run:
+                    received_unix_ns = metadata.get("received_unix_ns")
+                    recv_time = (
+                        float(received_unix_ns) / 1_000_000_000
+                        if received_unix_ns is not None
+                        else time.time()
+                    )
+                    await write_mc_companion_info(
+                        recv_time=recv_time,
+                        model=metadata.get("receiver_type"),
+                        firmware=metadata.get("receiver_version"),
+                        build=metadata.get("receiver_build"),
+                        noise_floor=None,
+                        node_name=metadata.get("receiver_name"),
+                        public_key=receiver_id,
+                        tcp_connected=1,
+                        node_role=metadata.get("node_role"),
+                    )
+
             decoded = decode_mc_rx_record(
                 payload_hex,
                 metadata,

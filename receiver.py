@@ -33,7 +33,8 @@ DEFAULT_PORT = 9000
 PACKET_HEADER_SIZE = 16
 HELLO_HEADER_SIZE = 8
 CRC_SIZE = 4
-HELLO_LENGTH_TABLE_SIZE = 5
+HELLO_LENGTH_TABLE_SIZE_V1 = 5
+HELLO_LENGTH_TABLE_SIZE_V2 = 6
 
 MAX_PAYLOAD_SIZE = 4096
 MAX_HELLO_PAYLOAD_SIZE = 4096
@@ -73,6 +74,7 @@ class PacketTapHello:
     receiver_type: str
     receiver_version: str
     receiver_build: str
+    node_role: str
     crc_received: int
     crc_calculated: int
 
@@ -215,10 +217,16 @@ class PacketTapParser:
         if len(self.buffer) < HELLO_HEADER_SIZE:
             return None
 
+        version = self.buffer[4]
         payload_length = struct.unpack_from("<H", self.buffer, 6)[0]
+        length_table_size = (
+            HELLO_LENGTH_TABLE_SIZE_V1
+            if version == 1
+            else HELLO_LENGTH_TABLE_SIZE_V2
+        )
 
         if (
-            payload_length < HELLO_LENGTH_TABLE_SIZE
+            payload_length < length_table_size
             or payload_length > self.max_hello_payload_size
         ):
             del self.buffer[0]
@@ -232,7 +240,6 @@ class PacketTapParser:
         raw = bytes(self.buffer[:frame_size])
         del self.buffer[:frame_size]
 
-        version = raw[4]
         flags = raw[5]
         payload = raw[
             HELLO_HEADER_SIZE:
@@ -249,13 +256,13 @@ class PacketTapParser:
             & 0xFFFFFFFF
         )
 
-        lengths = list(payload[:HELLO_LENGTH_TABLE_SIZE])
-        field_bytes = payload[HELLO_LENGTH_TABLE_SIZE:]
+        lengths = list(payload[:length_table_size])
+        field_bytes = payload[length_table_size:]
 
         if sum(lengths) != len(field_bytes):
             # Structurally invalid hello. Keep it visible, but with empty
             # identity fields so it cannot become active receiver metadata.
-            fields = ["", "", "", "", ""]
+            fields = [""] * length_table_size
         else:
             fields: list[str] = []
             offset = 0
@@ -277,6 +284,7 @@ class PacketTapParser:
             receiver_type=fields[2],
             receiver_version=fields[3],
             receiver_build=fields[4],
+            node_role=fields[5] if len(fields) > 5 else "",
             crc_received=crc_received,
             crc_calculated=crc_calculated,
         )
@@ -347,6 +355,7 @@ class CaptureFiles:
             "receiver_type": hello.receiver_type if hello else None,
             "receiver_version": hello.receiver_version if hello else None,
             "receiver_build": hello.receiver_build if hello else None,
+            "node_role": hello.node_role if hello else None,
             "hello_protocol_version": hello.version if hello else None,
         }
 
@@ -432,6 +441,9 @@ class CaptureServer:
                         )
                         print(
                             f"        build={event.receiver_build or '-'}"
+                        )
+                        print(
+                            f"        role={event.node_role or '-'}"
                         )
 
                         if (
@@ -547,7 +559,7 @@ class CaptureServer:
         print(f"Log:    {self.files.log_path}")
         print(f"Stream: {self.files.stream_path}")
         print(
-            "Unterstützt: PKTH v1 (HELLO) + PKTP v1 (Radio Frames)"
+            "Unterstützt: PKTH v1/v2 (HELLO) + PKTP v1 (Radio Frames)"
         )
         print(
             "Beenden mit q + Enter, Strg+C oder Strg+Pause.\n"
