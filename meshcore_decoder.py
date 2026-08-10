@@ -47,6 +47,13 @@ ROUTE_TYPE_NAMES = {
     3: "TRANSPORT_DIRECT",
 }
 
+ADVERT_NODE_ROLE_NAMES = {
+    0x01: "companion",
+    0x02: "repeater",
+    0x03: "room_server",
+    0x04: "sensor",
+}
+
 PAYLOAD_TYPE_NAMES = {
     0x00: "REQ",
     0x01: "RESPONSE",
@@ -704,8 +711,120 @@ def decode_grp_data(decoded: dict[str, Any]) -> dict[str, Any]:
 
 
 def decode_advert(decoded: dict[str, Any]) -> dict[str, Any]:
-    """Decode ADVERT metadata placeholder."""
-    return {}
+    """Decode a MeshCore node advertisement.
+
+    Packet payload layout::
+
+        public_key        32 bytes
+        advert_timestamp   4 bytes, little endian Unix time
+        signature         64 bytes
+        appdata            remaining bytes
+
+    Appdata begins with one flags byte. Optional fields then occur in this
+    order: latitude, longitude, feature1, feature2, and finally node name.
+    """
+    result: dict[str, Any] = {
+        "advert_public_key": None,
+        "advert_timestamp": None,
+        "advert_signature_hex": None,
+        "advert_flags": None,
+        "advert_node_role": None,
+        "advert_lat": None,
+        "advert_lon": None,
+        "advert_feature1": None,
+        "advert_feature2": None,
+        "advert_name": None,
+        "advert_error": None,
+    }
+
+    packet_payload_hex = decoded.get("packet_payload_hex")
+    normalized = normalize_payload_hex(packet_payload_hex)
+    if normalized is None:
+        result["advert_error"] = "missing_packet_payload"
+        return result
+
+    raw = bytes.fromhex(normalized)
+
+    # public key + timestamp + signature
+    minimum_length = 32 + 4 + 64
+    if len(raw) < minimum_length:
+        result["advert_error"] = "advert_too_short"
+        return result
+
+    result["advert_public_key"] = raw[:32].hex()
+    result["advert_timestamp"] = int.from_bytes(
+        raw[32:36],
+        byteorder="little",
+        signed=False,
+    )
+    result["advert_signature_hex"] = raw[36:100].hex()
+
+    appdata = raw[100:]
+    if not appdata:
+        return result
+
+    flags = appdata[0]
+    result["advert_flags"] = flags
+
+    node_type = flags & 0x0F
+    result["advert_node_role"] = ADVERT_NODE_ROLE_NAMES.get(
+        node_type,
+        "unknown" if node_type else None,
+    )
+
+    index = 1
+
+    if flags & 0x10:
+        if len(appdata) < index + 8:
+            result["advert_error"] = "advert_location_truncated"
+            return result
+
+        lat_raw = int.from_bytes(
+            appdata[index:index + 4],
+            byteorder="little",
+            signed=True,
+        )
+        index += 4
+        lon_raw = int.from_bytes(
+            appdata[index:index + 4],
+            byteorder="little",
+            signed=True,
+        )
+        index += 4
+
+        result["advert_lat"] = lat_raw / 1_000_000.0
+        result["advert_lon"] = lon_raw / 1_000_000.0
+
+    if flags & 0x20:
+        if len(appdata) < index + 2:
+            result["advert_error"] = "advert_feature1_truncated"
+            return result
+        result["advert_feature1"] = int.from_bytes(
+            appdata[index:index + 2],
+            byteorder="little",
+            signed=False,
+        )
+        index += 2
+
+    if flags & 0x40:
+        if len(appdata) < index + 2:
+            result["advert_error"] = "advert_feature2_truncated"
+            return result
+        result["advert_feature2"] = int.from_bytes(
+            appdata[index:index + 2],
+            byteorder="little",
+            signed=False,
+        )
+        index += 2
+
+    if flags & 0x80:
+        name_raw = appdata[index:]
+        result["advert_name"] = clean_decoded_text(
+            name_raw.decode("utf-8", errors="replace"),
+            96,
+        )
+
+    return result
 
 
 def decode_control(decoded: dict[str, Any]) -> dict[str, Any]:
@@ -737,6 +856,17 @@ def decode_payload_metadata(decoded: dict[str, Any]) -> dict[str, Any]:
         "grp_txt_body": None,
         "txt_msg_dest_hash": None,
         "txt_msg_src_hash": None,
+        "advert_public_key": None,
+        "advert_timestamp": None,
+        "advert_signature_hex": None,
+        "advert_flags": None,
+        "advert_node_role": None,
+        "advert_lat": None,
+        "advert_lon": None,
+        "advert_feature1": None,
+        "advert_feature2": None,
+        "advert_name": None,
+        "advert_error": None,
     }
 
     decoder = PAYLOAD_DECODERS.get(decoded.get("payload_type_name"))
@@ -972,6 +1102,21 @@ def decode_mc_rx_record(
         "packet_payload_sha256": decoded["packet_payload_sha256"],
         "txt_msg_dest_hash": payload_metadata["txt_msg_dest_hash"],
         "txt_msg_src_hash": payload_metadata["txt_msg_src_hash"],
+
+        # Passive ADVERT metadata. These fields are decoded only; they are not
+        # written to mc_contacts until the next implementation step.
+        "advert_public_key": payload_metadata["advert_public_key"],
+        "advert_timestamp": payload_metadata["advert_timestamp"],
+        "advert_signature_hex": payload_metadata["advert_signature_hex"],
+        "advert_flags": payload_metadata["advert_flags"],
+        "advert_node_role": payload_metadata["advert_node_role"],
+        "advert_lat": payload_metadata["advert_lat"],
+        "advert_lon": payload_metadata["advert_lon"],
+        "advert_feature1": payload_metadata["advert_feature1"],
+        "advert_feature2": payload_metadata["advert_feature2"],
+        "advert_name": payload_metadata["advert_name"],
+        "advert_error": payload_metadata["advert_error"],
+        "advert_hop_count": decoded["path_len"],
 
         # PacketTap-specific receive metadata. Companion-originated records
         # keep these values as None.
