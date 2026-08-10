@@ -12,13 +12,19 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from mc_db import QuestDBWriter, configure_writer
-from mc_writer import write_decoded_packet, write_mc_companion_info
+from mc_writer import (
+    write_decoded_packet,
+    write_mc_companion_info,
+    write_mc_contact,
+    write_mc_contact_observation,
+)
 from meshcore_decoder import decode_mc_rx_record
 
 
 DEFAULT_CAPTURE_FILE = Path("packettap_capture.log")
 DEFAULT_QUESTDB_HOST = "192.168.1.2"
 DEFAULT_QUESTDB_PORT = 9000
+DEFAULT_RECEIVER_CONFIG = Path("receiver_config.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,6 +84,15 @@ def parse_args() -> argparse.Namespace:
             "new records."
         ),
     )
+    parser.add_argument(
+        "--receiver-config",
+        type=Path,
+        default=DEFAULT_RECEIVER_CONFIG,
+        help=(
+            "Receiver identity JSON "
+            f"(default: {DEFAULT_RECEIVER_CONFIG})"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -104,6 +119,38 @@ async def iter_json_lines(
                 break
 
             await asyncio.sleep(0.25)
+
+
+def load_receiver_config(path: Path) -> dict[str, Any]:
+    defaults = {
+        "receiver_id": "ptap01",
+        "receiver_name": "PacketTap Receiver",
+        "receiver_type": "PacketTap",
+        "receiver_version": "1",
+    }
+
+    if not path.is_file():
+        print(f"[WARNUNG] {path} nicht gefunden; verwende Standardwerte.")
+        return defaults
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"Receiver-Konfiguration ungültig: {path}: {exc}"
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"Receiver-Konfiguration muss ein JSON-Objekt sein: {path}"
+        )
+
+    result = dict(defaults)
+    for key in defaults:
+        value = data.get(key)
+        if value is not None and str(value).strip():
+            result[key] = str(value).strip()
+    return result
 
 
 def parse_peer(peer: Any) -> tuple[str | None, int | None]:
@@ -134,18 +181,15 @@ def parse_peer(peer: Any) -> tuple[str | None, int | None]:
 def build_metadata(
     capture_record: dict[str, Any],
     repeater: str | None,
+    receiver_config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build metadata only from the capture record and CLI overrides.
-
-    Receiver identity is supplied by receiver.py from the PKTH HELLO frame.
-    No local config file is used.
-    """
     metadata = dict(capture_record)
 
     if repeater:
         metadata["repeater"] = repeater
 
     receiver_ip, receiver_port = parse_peer(capture_record.get("peer"))
+    metadata.update(receiver_config)
     metadata["receiver_ip"] = receiver_ip
     metadata["receiver_port"] = receiver_port
     metadata["receiver_time_ns"] = capture_record.get("received_unix_ns")
@@ -181,12 +225,23 @@ def print_record(
             f"msg={decoded['grp_txt_body']}"
         )
 
+    if decoded["payload_type"] == "ADVERT":
+        print(
+            "       advert "
+            f"name={decoded.get('advert_name')} "
+            f"role={decoded.get('advert_node_role')} "
+            f"hops={decoded.get('advert_hop_count')} "
+            f"key={decoded.get('advert_public_key')}"
+        )
+
 
 async def run_import(args: argparse.Namespace) -> int:
     if not args.capture_file.is_file():
         raise SystemExit(
             f"Capture file not found: {args.capture_file}"
         )
+
+    receiver_config = load_receiver_config(args.receiver_config)
 
     writer: QuestDBWriter | None = None
     writer_task: asyncio.Task[None] | None = None
@@ -204,6 +259,7 @@ async def run_import(args: argparse.Namespace) -> int:
     skipped = 0
     invalid = 0
     seen_receiver_ids: set[str] = set()
+    seen_contact_public_keys: set[str] = set()
 
     try:
         async for line_number, line in iter_json_lines(
@@ -246,6 +302,7 @@ async def run_import(args: argparse.Namespace) -> int:
             metadata = build_metadata(
                 capture_record,
                 args.repeater,
+                receiver_config,
             )
 
             receiver_id = str(metadata.get("receiver_id") or "").strip()
@@ -299,6 +356,63 @@ async def run_import(args: argparse.Namespace) -> int:
 
             if not args.dry_run:
                 await write_decoded_packet(decoded)
+
+                if decoded.get("payload_type") == "ADVERT":
+                    public_key = str(
+                        decoded.get("advert_public_key") or ""
+                    ).strip()
+
+                    # A structurally valid ADVERT always carries its public key.
+                    if public_key:
+                        # mc_contacts is treated as a compact node/contact
+                        # directory. During one importer run we write one
+                        # snapshot row per observed public key.
+                        if public_key not in seen_contact_public_keys:
+                            seen_contact_public_keys.add(public_key)
+
+                            await write_mc_contact(
+                                recv_time=decoded.get("recv_time"),
+                                public_key=public_key,
+                                adv_name=decoded.get("advert_name"),
+                                contact_type=None,
+                                flags=decoded.get("advert_flags"),
+                                out_path_hash_mode=None,
+                                out_path_len=None,
+                                out_path=None,
+                                last_advert=decoded.get(
+                                    "advert_timestamp"
+                                ),
+                                adv_lat=decoded.get("advert_lat"),
+                                adv_lon=decoded.get("advert_lon"),
+                                lastmod=decoded.get(
+                                    "advert_timestamp"
+                                ),
+                                node_role=decoded.get(
+                                    "advert_node_role"
+                                ),
+                                source_type="advert",
+                            )
+
+                        # mc_contact_observations is deliberately historical:
+                        # every received ADVERT is stored with RF/path data.
+                        await write_mc_contact_observation(
+                            recv_time=decoded.get("recv_time"),
+                            public_key=public_key,
+                            receiver_id=decoded.get("receiver_id"),
+                            receiver_name=decoded.get("receiver_name"),
+                            node_role=decoded.get(
+                                "advert_node_role"
+                            ),
+                            hop_count=decoded.get(
+                                "advert_hop_count"
+                            ),
+                            rssi_dbm=decoded.get("rssi_dbm"),
+                            snr_db=decoded.get("snr_db"),
+                            region_name=decoded.get("region_name"),
+                            packet_payload_sha256=decoded.get(
+                                "packet_payload_sha256"
+                            ),
+                        )
 
             imported += 1
 

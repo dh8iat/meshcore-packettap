@@ -1068,9 +1068,14 @@ def decode_mc_rx_record(
     # unless a future PacketTap version supplies it in metadata.
     pkt_hash = safe_int(metadata.get("pkt_hash"))
 
+    # Region resolution applies to every transport-routed packet type.
+    # MeshCore route types 0 (TRANSPORT_FLOOD) and 3 (TRANSPORT_DIRECT)
+    # carry the two transport codes. As before, transport1 is treated as the
+    # region transport code and is resolved against regions.json using the
+    # actual payload type and packet payload.
     region_code = None
     region_name = None
-    if decoded["payload_type_name"] in {"GRP_TXT", "GRP_DATA"}:
+    if decoded.get("has_transport_codes"):
         region_code = decoded.get("transport1")
         region_name = resolve_region(
             region_code,
@@ -1089,6 +1094,8 @@ def decode_mc_rx_record(
         "region_name": region_name,
         "channel_name": payload_metadata["channel_name"],
         "payload_route_type": decoded["route_type"],
+        "transport1": decoded.get("transport1"),
+        "transport2": decoded.get("transport2"),
         "pkt_hash": pkt_hash,
         "grp_txt_sender_name": payload_metadata["grp_txt_sender_name"],
         "grp_txt_body": payload_metadata["grp_txt_body"],

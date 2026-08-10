@@ -14,6 +14,7 @@ TABLE_NEIGHBOR_DISCOVERY = "mc_neighbor_discovery"
 TABLE_REPEATER_NEIGHBORS = "mc_repeater_neighbors"
 TABLE_COMPANION_INFO = "mc_companion_info"
 TABLE_CONTACTS = "mc_contacts"
+TABLE_CONTACT_OBSERVATIONS = "mc_contact_observations"
 
 MC_RX_OPTIONAL_FIELDS = {
     "capture_sequence",
@@ -309,6 +310,8 @@ async def write_mc_contact(
     adv_lat,
     adv_lon,
     lastmod,
+    node_role=None,
+    source_type=None,
 ) -> None:
     await write_row(
         TABLE_CONTACTS,
@@ -320,6 +323,8 @@ async def write_mc_contact(
                 str(contact_type) if contact_type is not None else None
             ),
             "out_path": out_path,
+            "node_role": node_role,
+            "source_type": source_type,
         },
         columns={
             "flags": flags,
@@ -331,3 +336,39 @@ async def write_mc_contact(
             "lastmod": lastmod,
         },
     )
+
+async def write_mc_contact_observation(
+    recv_time,
+    public_key,
+    receiver_id,
+    receiver_name,
+    node_role,
+    hop_count,
+    rssi_dbm,
+    snr_db,
+    region_name,
+    packet_payload_sha256,
+) -> None:
+    """Write one passive ADVERT observation.
+
+    Unlike mc_contacts, this table is intentionally historical: every
+    received ADVERT can produce one observation row.
+    """
+    await write_row(
+        TABLE_CONTACT_OBSERVATIONS,
+        recv_time,
+        symbols={
+            "public_key": public_key,
+            "receiver_id": receiver_id,
+            "receiver_name": receiver_name,
+            "node_role": node_role,
+            "region": region_name,
+            "packet_payload_sha256": packet_payload_sha256,
+        },
+        columns={
+            "hop_count": hop_count,
+            "rssi_dbm": rssi_dbm,
+            "snr_db": snr_db,
+        },
+    )
+
