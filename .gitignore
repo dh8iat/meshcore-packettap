@@ -20,5 +20,5 @@ public_channel_keys.json
 .vscode/
 .idea/
 .DS_Store
-Thumbs.dbstate/
+Thumbs.db
 state/
