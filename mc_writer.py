@@ -348,6 +348,10 @@ async def write_mc_contact_observation(
     snr_db,
     region_name,
     packet_payload_sha256,
+    source_type=None,
+    discover_snr=None,
+    discover_tag=None,
+    public_key_bytes=None,
 ) -> None:
     """Write one passive ADVERT observation.
 
@@ -364,11 +368,15 @@ async def write_mc_contact_observation(
             "node_role": node_role,
             "region": region_name,
             "packet_payload_sha256": packet_payload_sha256,
+            "source_type": source_type,
+            "discover_tag": discover_tag,
         },
         columns={
             "hop_count": hop_count,
             "rssi_dbm": rssi_dbm,
             "snr_db": snr_db,
+            "discover_snr": discover_snr,
+            "public_key_bytes": public_key_bytes,
         },
     )
 

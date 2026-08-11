@@ -313,6 +313,19 @@ def print_record(
             f"key={decoded.get('advert_public_key')}"
         )
 
+    if (
+        decoded["payload_type"] == "CONTROL"
+        and decoded.get("control_subtype_name") == "DISCOVER_RESP"
+    ):
+        print(
+            "       discover_resp "
+            f"role={decoded.get('control_node_role')} "
+            f"hops={decoded.get('control_hop_count')} "
+            f"discover_snr={decoded.get('control_discover_snr')} "
+            f"key_bytes={decoded.get('control_public_key_bytes')} "
+            f"key={decoded.get('control_public_key')}"
+        )
+
 
 async def run_import(args: argparse.Namespace) -> int:
     if not args.capture_file.is_file():
@@ -586,6 +599,49 @@ async def run_import(args: argparse.Namespace) -> int:
                             packet_payload_sha256=decoded.get(
                                 "packet_payload_sha256"
                             ),
+                            source_type="advert",
+                        )
+
+                if (
+                    decoded.get("payload_type") == "CONTROL"
+                    and decoded.get("control_subtype_name")
+                    == "DISCOVER_RESP"
+                ):
+                    public_key = str(
+                        decoded.get("control_public_key") or ""
+                    ).strip()
+                    public_key_bytes = decoded.get(
+                        "control_public_key_bytes"
+                    )
+
+                    if public_key:
+                        # DISCOVER_RESP is observation-only. This avoids
+                        # replacing richer ADVERT snapshots in mc_contacts.
+                        await write_mc_contact_observation(
+                            recv_time=decoded.get("recv_time"),
+                            public_key=public_key,
+                            receiver_id=decoded.get("receiver_id"),
+                            receiver_name=decoded.get("receiver_name"),
+                            node_role=decoded.get(
+                                "control_node_role"
+                            ),
+                            hop_count=decoded.get(
+                                "control_hop_count"
+                            ),
+                            rssi_dbm=decoded.get("rssi_dbm"),
+                            snr_db=decoded.get("snr_db"),
+                            region_name=decoded.get("region_name"),
+                            packet_payload_sha256=decoded.get(
+                                "packet_payload_sha256"
+                            ),
+                            source_type="discover_resp",
+                            discover_snr=decoded.get(
+                                "control_discover_snr"
+                            ),
+                            discover_tag=decoded.get(
+                                "control_discover_tag"
+                            ),
+                            public_key_bytes=public_key_bytes,
                         )
 
             imported += 1

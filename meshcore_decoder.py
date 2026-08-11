@@ -735,6 +735,16 @@ def decode_advert(decoded: dict[str, Any]) -> dict[str, Any]:
         "advert_feature2": None,
         "advert_name": None,
         "advert_error": None,
+        "control_flags": None,
+        "control_subtype": None,
+        "control_subtype_name": None,
+        "control_node_type": None,
+        "control_node_role": None,
+        "control_discover_snr": None,
+        "control_discover_tag": None,
+        "control_public_key": None,
+        "control_public_key_bytes": None,
+        "control_error": None,
     }
 
     packet_payload_hex = decoded.get("packet_payload_hex")
@@ -828,8 +838,77 @@ def decode_advert(decoded: dict[str, Any]) -> dict[str, Any]:
 
 
 def decode_control(decoded: dict[str, Any]) -> dict[str, Any]:
-    """Decode CONTROL metadata placeholder."""
-    return {}
+    """Decode MeshCore CONTROL metadata.
+
+    Implemented subtype:
+      * DISCOVER_RESP (0x9)
+
+    DISCOVER_RESP payload:
+      flags   1 byte: upper nibble subtype, lower nibble node type
+      snr     1 byte: signed SNR * 4
+      tag     4 bytes
+      pubkey  8 or 32 bytes
+    """
+    result: dict[str, Any] = {
+        "control_flags": None,
+        "control_subtype": None,
+        "control_subtype_name": None,
+        "control_node_type": None,
+        "control_node_role": None,
+        "control_discover_snr": None,
+        "control_discover_tag": None,
+        "control_public_key": None,
+        "control_public_key_bytes": None,
+        "control_error": None,
+    }
+
+    normalized = normalize_payload_hex(decoded.get("packet_payload_hex"))
+    if normalized is None:
+        result["control_error"] = "missing_packet_payload"
+        return result
+
+    raw = bytes.fromhex(normalized)
+    if not raw:
+        result["control_error"] = "control_too_short"
+        return result
+
+    flags = raw[0]
+    subtype = (flags >> 4) & 0x0F
+    node_type = flags & 0x0F
+
+    result["control_flags"] = flags
+    result["control_subtype"] = subtype
+    result["control_node_type"] = node_type
+    result["control_node_role"] = ADVERT_NODE_ROLE_NAMES.get(
+        node_type,
+        "unknown" if node_type else None,
+    )
+
+    if subtype != 0x09:
+        result["control_subtype_name"] = f"UNKNOWN_{subtype:X}"
+        return result
+
+    result["control_subtype_name"] = "DISCOVER_RESP"
+
+    if len(raw) < 6:
+        result["control_error"] = "discover_resp_too_short"
+        return result
+
+    snr_raw = int.from_bytes(raw[1:2], byteorder="little", signed=True)
+    result["control_discover_snr"] = snr_raw / 4.0
+    result["control_discover_tag"] = raw[2:6].hex()
+
+    public_key_raw = raw[6:]
+    if len(public_key_raw) not in (8, 32):
+        result["control_error"] = (
+            f"discover_resp_invalid_pubkey_length:{len(public_key_raw)}"
+        )
+        return result
+
+    result["control_public_key"] = public_key_raw.hex()
+    result["control_public_key_bytes"] = len(public_key_raw)
+
+    return result
 
 
 PAYLOAD_DECODERS = {
@@ -867,6 +946,16 @@ def decode_payload_metadata(decoded: dict[str, Any]) -> dict[str, Any]:
         "advert_feature2": None,
         "advert_name": None,
         "advert_error": None,
+        "control_flags": None,
+        "control_subtype": None,
+        "control_subtype_name": None,
+        "control_node_type": None,
+        "control_node_role": None,
+        "control_discover_snr": None,
+        "control_discover_tag": None,
+        "control_public_key": None,
+        "control_public_key_bytes": None,
+        "control_error": None,
     }
 
     decoder = PAYLOAD_DECODERS.get(decoded.get("payload_type_name"))
@@ -1124,6 +1213,20 @@ def decode_mc_rx_record(
         "advert_name": payload_metadata["advert_name"],
         "advert_error": payload_metadata["advert_error"],
         "advert_hop_count": decoded["path_len"],
+
+        "control_flags": payload_metadata["control_flags"],
+        "control_subtype": payload_metadata["control_subtype"],
+        "control_subtype_name": payload_metadata["control_subtype_name"],
+        "control_node_type": payload_metadata["control_node_type"],
+        "control_node_role": payload_metadata["control_node_role"],
+        "control_discover_snr": payload_metadata["control_discover_snr"],
+        "control_discover_tag": payload_metadata["control_discover_tag"],
+        "control_public_key": payload_metadata["control_public_key"],
+        "control_public_key_bytes": payload_metadata[
+            "control_public_key_bytes"
+        ],
+        "control_error": payload_metadata["control_error"],
+        "control_hop_count": decoded["path_len"],
 
         # PacketTap-specific receive metadata. Companion-originated records
         # keep these values as None.
