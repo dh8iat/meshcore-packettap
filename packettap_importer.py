@@ -26,7 +26,6 @@ from meshcore_decoder import decode_mc_rx_record
 DEFAULT_CAPTURE_FILE = Path("packettap_capture.log")
 DEFAULT_QUESTDB_HOST = "192.168.1.2"
 DEFAULT_QUESTDB_PORT = 9000
-DEFAULT_RECEIVER_CONFIG = Path("receiver_config.json")
 DEFAULT_CHECKPOINT_FILE = Path("state/importer.state")
 DEFAULT_CHECKPOINT_ROWS = 100
 DEFAULT_CHECKPOINT_SECONDS = 5.0
@@ -87,15 +86,6 @@ def parse_args() -> argparse.Namespace:
         help=(
             "With --follow, ignore existing lines and process only "
             "new records."
-        ),
-    )
-    parser.add_argument(
-        "--receiver-config",
-        type=Path,
-        default=DEFAULT_RECEIVER_CONFIG,
-        help=(
-            "Receiver identity JSON "
-            f"(default: {DEFAULT_RECEIVER_CONFIG})"
         ),
     )
     parser.add_argument(
@@ -240,38 +230,6 @@ def reset_checkpoint(path: Path) -> None:
 
     print(f"[CHECKPOINT] Gelöscht: {path}")
 
-def load_receiver_config(path: Path) -> dict[str, Any]:
-    defaults = {
-        "receiver_id": "ptap01",
-        "receiver_name": "PacketTap Receiver",
-        "receiver_type": "PacketTap",
-        "receiver_version": "1",
-    }
-
-    if not path.is_file():
-        print(f"[WARNUNG] {path} nicht gefunden; verwende Standardwerte.")
-        return defaults
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(
-            f"Receiver-Konfiguration ungültig: {path}: {exc}"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise SystemExit(
-            f"Receiver-Konfiguration muss ein JSON-Objekt sein: {path}"
-        )
-
-    result = dict(defaults)
-    for key in defaults:
-        value = data.get(key)
-        if value is not None and str(value).strip():
-            result[key] = str(value).strip()
-    return result
-
-
 def parse_peer(peer: Any) -> tuple[str | None, int | None]:
     if peer is None:
         return None, None
@@ -300,10 +258,12 @@ def parse_peer(peer: Any) -> tuple[str | None, int | None]:
 def build_metadata(
     capture_record: dict[str, Any],
     repeater: str | None,
-    receiver_config: dict[str, Any],
 ) -> dict[str, Any]:
-    metadata = dict(receiver_config)
-    metadata.update(capture_record)
+    """Build metadata directly from the PacketTap capture record.
+
+    Receiver identity comes from receiver.py via the PKTH HELLO frame.
+    """
+    metadata = dict(capture_record)
 
     if repeater:
         metadata["repeater"] = repeater
@@ -359,8 +319,6 @@ async def run_import(args: argparse.Namespace) -> int:
         raise SystemExit(
             f"Capture file not found: {args.capture_file}"
         )
-
-    receiver_config = load_receiver_config(args.receiver_config)
 
     if args.reset_checkpoint:
         reset_checkpoint(args.checkpoint_file)
@@ -514,7 +472,6 @@ async def run_import(args: argparse.Namespace) -> int:
             metadata = build_metadata(
                 capture_record,
                 args.repeater,
-                receiver_config,
             )
 
             receiver_id = str(metadata.get("receiver_id") or "").strip()
