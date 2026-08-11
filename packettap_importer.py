@@ -7,7 +7,9 @@ import argparse
 import ast
 import asyncio
 import json
+import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -25,6 +27,9 @@ DEFAULT_CAPTURE_FILE = Path("packettap_capture.log")
 DEFAULT_QUESTDB_HOST = "192.168.1.2"
 DEFAULT_QUESTDB_PORT = 9000
 DEFAULT_RECEIVER_CONFIG = Path("receiver_config.json")
+DEFAULT_CHECKPOINT_FILE = Path("state/importer.state")
+DEFAULT_CHECKPOINT_ROWS = 100
+DEFAULT_CHECKPOINT_SECONDS = 5.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,6 +98,43 @@ def parse_args() -> argparse.Namespace:
             f"(default: {DEFAULT_RECEIVER_CONFIG})"
         ),
     )
+    parser.add_argument(
+        "--checkpoint-file",
+        type=Path,
+        default=DEFAULT_CHECKPOINT_FILE,
+        help=(
+            "Checkpoint state file used with --follow "
+            f"(default: {DEFAULT_CHECKPOINT_FILE})"
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-rows",
+        type=int,
+        default=DEFAULT_CHECKPOINT_ROWS,
+        help=(
+            "Advance checkpoint after this many consumed records "
+            f"(default: {DEFAULT_CHECKPOINT_ROWS})."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-seconds",
+        type=float,
+        default=DEFAULT_CHECKPOINT_SECONDS,
+        help=(
+            "Also advance a pending checkpoint after this many seconds "
+            f"(default: {DEFAULT_CHECKPOINT_SECONDS})."
+        ),
+    )
+    parser.add_argument(
+        "--no-checkpoint",
+        action="store_true",
+        help="Disable persistent checkpointing in --follow mode.",
+    )
+    parser.add_argument(
+        "--reset-checkpoint",
+        action="store_true",
+        help="Delete the stored checkpoint before startup.",
+    )
     return parser.parse_args()
 
 
@@ -100,19 +142,24 @@ async def iter_json_lines(
     path: Path,
     *,
     follow: bool,
-    start_at_end: bool,
-) -> AsyncIterator[tuple[int, str]]:
-    with path.open("r", encoding="utf-8") as handle:
-        if follow and start_at_end:
-            handle.seek(0, 2)
-
+    start_offset: int,
+) -> AsyncIterator[tuple[int, str, int]]:
+    """Yield line number, text and byte offset immediately after the line."""
+    with path.open("rb") as handle:
+        handle.seek(start_offset)
         line_number = 0
 
         while True:
-            line = handle.readline()
-            if line:
+            raw_line = handle.readline()
+
+            if raw_line:
                 line_number += 1
-                yield line_number, line
+                end_offset = handle.tell()
+                yield (
+                    line_number,
+                    raw_line.decode("utf-8", errors="replace"),
+                    end_offset,
+                )
                 continue
 
             if not follow:
@@ -120,6 +167,78 @@ async def iter_json_lines(
 
             await asyncio.sleep(0.25)
 
+
+
+
+def checkpoint_enabled(args: argparse.Namespace) -> bool:
+    return (
+        args.follow
+        and not args.dry_run
+        and not args.no_checkpoint
+    )
+
+
+def load_checkpoint(path: Path, capture_file: Path) -> int | None:
+    if not path.is_file():
+        return None
+
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[CHECKPOINT] Ungültiger Zustand, ignoriere ihn: {exc}")
+        return None
+
+    if not isinstance(state, dict):
+        return None
+
+    if state.get("capture_file") != str(capture_file.resolve()):
+        print(
+            "[CHECKPOINT] Zustand gehört zu einer anderen Capture-Datei; "
+            "ignoriere ihn."
+        )
+        return None
+
+    try:
+        offset = int(state.get("offset", 0))
+    except (TypeError, ValueError):
+        return None
+
+    file_size = capture_file.stat().st_size
+    if offset < 0 or offset > file_size:
+        print(
+            "[CHECKPOINT] Offset passt nicht zur aktuellen Dateigröße; "
+            "starte bei Offset 0."
+        )
+        return 0
+
+    return offset
+
+
+def save_checkpoint(path: Path, capture_file: Path, offset: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    state = {
+        "version": 1,
+        "capture_file": str(capture_file.resolve()),
+        "offset": int(offset),
+        "updated_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temp_path, path)
+
+
+def reset_checkpoint(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+    print(f"[CHECKPOINT] Gelöscht: {path}")
 
 def load_receiver_config(path: Path) -> dict[str, Any]:
     defaults = {
@@ -183,13 +302,13 @@ def build_metadata(
     repeater: str | None,
     receiver_config: dict[str, Any],
 ) -> dict[str, Any]:
-    metadata = dict(capture_record)
+    metadata = dict(receiver_config)
+    metadata.update(capture_record)
 
     if repeater:
         metadata["repeater"] = repeater
 
     receiver_ip, receiver_port = parse_peer(capture_record.get("peer"))
-    metadata.update(receiver_config)
     metadata["receiver_ip"] = receiver_ip
     metadata["receiver_port"] = receiver_port
     metadata["receiver_time_ns"] = capture_record.get("received_unix_ns")
@@ -243,6 +362,32 @@ async def run_import(args: argparse.Namespace) -> int:
 
     receiver_config = load_receiver_config(args.receiver_config)
 
+    if args.reset_checkpoint:
+        reset_checkpoint(args.checkpoint_file)
+
+    use_checkpoint = checkpoint_enabled(args)
+    start_offset = 0
+
+    if use_checkpoint:
+        saved_offset = load_checkpoint(
+            args.checkpoint_file,
+            args.capture_file,
+        )
+        if saved_offset is not None:
+            start_offset = saved_offset
+            print(
+                f"[CHECKPOINT] Fortsetzen bei Byte-Offset {start_offset} "
+                f"aus {args.checkpoint_file}"
+            )
+        elif args.start_at_end:
+            start_offset = args.capture_file.stat().st_size
+            print(
+                "[CHECKPOINT] Kein gespeicherter Stand; "
+                f"Start am Dateiende bei Offset {start_offset}."
+            )
+    elif args.follow and args.start_at_end:
+        start_offset = args.capture_file.stat().st_size
+
     writer: QuestDBWriter | None = None
     writer_task: asyncio.Task[None] | None = None
 
@@ -261,14 +406,65 @@ async def run_import(args: argparse.Namespace) -> int:
     seen_receiver_ids: set[str] = set()
     seen_contact_public_keys: set[str] = set()
 
+    checkpoint_pending_offset: int | None = None
+    checkpoint_records = 0
+    checkpoint_db_dirty = False
+    last_checkpoint_time = time.monotonic()
+
+    async def advance_checkpoint(
+        end_offset: int,
+        *,
+        db_dirty: bool,
+        force: bool = False,
+    ) -> None:
+        nonlocal checkpoint_pending_offset
+        nonlocal checkpoint_records
+        nonlocal checkpoint_db_dirty
+        nonlocal last_checkpoint_time
+
+        if not use_checkpoint:
+            return
+
+        checkpoint_pending_offset = end_offset
+        checkpoint_records += 1
+        checkpoint_db_dirty = checkpoint_db_dirty or db_dirty
+
+        due_by_rows = checkpoint_records >= max(1, args.checkpoint_rows)
+        due_by_time = (
+            time.monotonic() - last_checkpoint_time
+            >= max(0.1, args.checkpoint_seconds)
+        )
+
+        if not force and not due_by_rows and not due_by_time:
+            return
+
+        # A checkpoint may only pass data that QuestDB has confirmed.
+        if checkpoint_db_dirty and writer is not None:
+            await writer.flush()
+
+        save_checkpoint(
+            args.checkpoint_file,
+            args.capture_file,
+            checkpoint_pending_offset,
+        )
+
+        checkpoint_records = 0
+        checkpoint_db_dirty = False
+        last_checkpoint_time = time.monotonic()
+
     try:
-        async for line_number, line in iter_json_lines(
+        async for line_number, line, end_offset in iter_json_lines(
             args.capture_file,
             follow=args.follow,
-            start_at_end=args.start_at_end,
+            start_offset=start_offset,
         ):
+            line_db_dirty = False
             text = line.strip()
             if not text:
+                await advance_checkpoint(
+                    end_offset,
+                    db_dirty=False,
+                )
                 continue
 
             try:
@@ -279,10 +475,18 @@ async def run_import(args: argparse.Namespace) -> int:
                     f"[WARNUNG] Ungültiges JSON in Zeile "
                     f"{line_number}: {exc}"
                 )
+                await advance_checkpoint(
+                    end_offset,
+                    db_dirty=False,
+                )
                 continue
 
             if not isinstance(capture_record, dict):
                 invalid += 1
+                await advance_checkpoint(
+                    end_offset,
+                    db_dirty=False,
+                )
                 continue
 
             if (
@@ -290,6 +494,10 @@ async def run_import(args: argparse.Namespace) -> int:
                 and not bool(capture_record.get("crc_ok", False))
             ):
                 skipped += 1
+                await advance_checkpoint(
+                    end_offset,
+                    db_dirty=False,
+                )
                 continue
 
             payload_hex = str(
@@ -297,6 +505,10 @@ async def run_import(args: argparse.Namespace) -> int:
             ).strip()
             if not payload_hex:
                 skipped += 1
+                await advance_checkpoint(
+                    end_offset,
+                    db_dirty=False,
+                )
                 continue
 
             metadata = build_metadata(
@@ -346,6 +558,10 @@ async def run_import(args: argparse.Namespace) -> int:
                     "[WARNUNG] Paket konnte nicht dekodiert werden: "
                     f"Zeile {line_number}"
                 )
+                await advance_checkpoint(
+                    end_offset,
+                    db_dirty=False,
+                )
                 continue
 
             print_record(
@@ -356,6 +572,7 @@ async def run_import(args: argparse.Namespace) -> int:
 
             if not args.dry_run:
                 await write_decoded_packet(decoded)
+                line_db_dirty = True
 
                 if decoded.get("payload_type") == "ADVERT":
                     public_key = str(
@@ -415,10 +632,28 @@ async def run_import(args: argparse.Namespace) -> int:
                         )
 
             imported += 1
+            await advance_checkpoint(
+                end_offset,
+                db_dirty=line_db_dirty,
+            )
 
     except KeyboardInterrupt:
         print("\nImport beendet.")
     finally:
+        if (
+            use_checkpoint
+            and checkpoint_pending_offset is not None
+            and checkpoint_records > 0
+        ):
+            if checkpoint_db_dirty and writer is not None:
+                await writer.flush()
+
+            save_checkpoint(
+                args.checkpoint_file,
+                args.capture_file,
+                checkpoint_pending_offset,
+            )
+
         if writer is not None:
             await writer.stop()
 

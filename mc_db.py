@@ -95,24 +95,36 @@ class QuestDBWriter:
                     continue
             clean_columns[key] = value
 
-        try:
-            self.queue.put_nowait(
-                {
-                    "type": "row",
-                    "table_name": table_name,
-                    "ts_seconds": ts_seconds,
-                    "symbols": clean_symbols,
-                    "columns": clean_columns,
-                }
-            )
-        except asyncio.QueueFull:
-            print("[DB] WARNUNG: Schreibqueue voll, Datensatz verworfen.")
+        # Backpressure is safer than dropping database rows.
+        await self.queue.put(
+            {
+                "type": "row",
+                "table_name": table_name,
+                "ts_seconds": ts_seconds,
+                "symbols": clean_symbols,
+                "columns": clean_columns,
+            }
+        )
 
     async def request_flush(self) -> None:
-        try:
-            self.queue.put_nowait({"type": "flush"})
-        except asyncio.QueueFull:
-            print("[DB] WARNUNG: Flush-Anforderung verworfen, Queue voll.")
+        """Request a flush without waiting for its completion."""
+        await self.queue.put({"type": "flush", "waiter": None})
+
+    async def flush(self) -> None:
+        """Wait until all rows queued before this call are in QuestDB."""
+        if not self.enabled:
+            return
+
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[None] = loop.create_future()
+
+        await self.queue.put(
+            {
+                "type": "flush",
+                "waiter": waiter,
+            }
+        )
+        await waiter
 
     def _send_batch_sync(self, batch: list[dict[str, Any]]) -> None:
         if not batch:
@@ -137,11 +149,21 @@ class QuestDBWriter:
 
     async def run(self) -> None:
         batch: list[dict[str, Any]] = []
+        flush_waiters: list[asyncio.Future[None]] = []
         last_batch_time = time.monotonic()
         backoff = 1
+        retry_pending = False
 
-        while self.running or not self.queue.empty():
-            try:
+        def resolve_flush_waiters() -> None:
+            while flush_waiters:
+                waiter = flush_waiters.pop(0)
+                if not waiter.done():
+                    waiter.set_result(None)
+
+        while self.running or not self.queue.empty() or batch:
+            should_flush = retry_pending
+
+            if not retry_pending:
                 timeout = max(
                     0.1,
                     self.flush_interval
@@ -150,19 +172,29 @@ class QuestDBWriter:
 
                 try:
                     item = await asyncio.wait_for(
-                        self.queue.get(), timeout=timeout
+                        self.queue.get(),
+                        timeout=timeout,
                     )
                 except asyncio.TimeoutError:
                     item = None
 
-                should_flush = False
                 if item is not None:
                     if item["type"] == "row":
                         batch.append(item)
                         if len(batch) >= self.flush_row_threshold:
                             should_flush = True
+
                     elif item["type"] == "flush":
-                        should_flush = True
+                        waiter = item.get("waiter")
+                        if waiter is not None:
+                            flush_waiters.append(waiter)
+
+                        if batch:
+                            should_flush = True
+                        else:
+                            # Everything before this barrier was already
+                            # committed by an earlier successful flush.
+                            resolve_flush_waiters()
 
                 if (
                     batch
@@ -171,37 +203,42 @@ class QuestDBWriter:
                 ):
                     should_flush = True
 
-                if should_flush and batch:
-                    await self._send_batch(batch)
-                    batch.clear()
-                    last_batch_time = time.monotonic()
-                    backoff = 1
+            if not should_flush or not batch:
+                continue
+
+            try:
+                await self._send_batch(batch)
 
             except Exception as exc:
                 now = time.monotonic()
                 if now - self.last_error_log >= self.error_log_interval:
                     print(
-                        "[DB] Schreibfehler, Batch wird verworfen: "
+                        "[DB] Schreibfehler, Batch bleibt erhalten "
+                        "und wird erneut versucht: "
                         f"{exc}"
                     )
                     self.last_error_log = now
-                batch.clear()
-                last_batch_time = time.monotonic()
+
+                # Do not consume more queue entries until this batch has been
+                # accepted. This preserves ordering across flush barriers.
+                retry_pending = True
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
+                continue
 
-        if batch:
-            try:
-                await self._send_batch(batch)
-            except Exception as exc:
-                print(
-                    "[DB] Fehler beim Schreiben des Restbatches: "
-                    f"{exc}"
-                )
+            # sender.flush() succeeded.
+            batch.clear()
+            last_batch_time = time.monotonic()
+            backoff = 1
+            retry_pending = False
+            resolve_flush_waiters()
+
+        resolve_flush_waiters()
 
     async def stop(self) -> None:
-        """Request a final flush and let run() terminate cleanly."""
-        await self.request_flush()
+        """Commit queued rows before stopping the writer."""
+        if self.enabled:
+            await self.flush()
         self.running = False
 
 
