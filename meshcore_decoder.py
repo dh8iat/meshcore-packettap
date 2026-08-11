@@ -1150,6 +1150,36 @@ def decode_mc_rx_record(
     else:
         repeater = repeater_from_path
 
+    # DIRECT (route type 2) packets with an empty routing path have no
+    # repeater value from path_nodes. For payload types that identify their
+    # origin unambiguously, preserve that identity as the repeater fallback.
+    #
+    # ADVERT:
+    #   carries a full 32-byte public key and node role.
+    #
+    # CONTROL / DISCOVER_RESP:
+    #   carries an 8- or 32-byte public key and node role.
+    #
+    # Existing repeater information from metadata/path always has priority.
+    if not repeater and decoded.get("route_type") == 2:
+        if (
+            decoded.get("payload_type_name") == "ADVERT"
+            and payload_metadata.get("advert_node_role") == "repeater"
+        ):
+            advert_public_key = payload_metadata.get("advert_public_key")
+            if advert_public_key:
+                repeater = str(advert_public_key)
+
+        elif (
+            decoded.get("payload_type_name") == "CONTROL"
+            and payload_metadata.get("control_subtype_name")
+            == "DISCOVER_RESP"
+            and payload_metadata.get("control_node_role") == "repeater"
+        ):
+            control_public_key = payload_metadata.get("control_public_key")
+            if control_public_key:
+                repeater = str(control_public_key)
+
     recv_time = parse_received_time_seconds(metadata)
 
     # Companion receives pkt_hash directly from RX_LOG_DATA. PacketTap does
