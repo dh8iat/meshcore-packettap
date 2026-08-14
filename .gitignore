@@ -22,3 +22,6 @@ public_channel_keys.json
 .DS_Store
 Thumbs.db
 state/
+
+# Generated repeater reports
+reports/
