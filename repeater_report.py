@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap - Repeater Report v0.9
+MeshCore PacketTap - Repeater Report v0.16
 =========================================
 
 Direkt auf das dokumentierte QuestDB-Datenmodell von meshcore-packettap
@@ -37,6 +37,11 @@ Wichtige Definitionen
     getrennt.
 - Kontaktmetadaten:
     pro public_key wird der neueste mc_contacts-Datensatz verwendet.
+- Eigene Adverts:
+    Zuordnung über public_key + packet_payload_sha256 aus den dekodierten
+    Contact-Observations und den zugehörigen ADVERT-Paketen.
+    Direct = RT 2 bei Hop 0; Flood = RT 0, pro Payload-Hash einmal.
+    Der typische Abstand ist der Median zwischen eindeutigen Advert-Ereignissen.
 
 Abhängigkeiten:
     Nur Python-Standardbibliothek.
@@ -124,7 +129,9 @@ class Metrics:
     repeater_public_key: str
 
     own_adverts_flood: int
+    own_adverts_flood_interval_minutes: float | None
     own_adverts_direct: int
+    own_adverts_direct_interval_minutes: float | None
 
     repeater_total_packets: int
     repeater_rank: int | None
@@ -779,6 +786,100 @@ def advert_public_key_from_payload(row: dict[str, Any]) -> str | None:
     return candidate
 
 
+def parse_timestamp(value: Any):
+    """Parse QuestDB ISO timestamps for interval calculations."""
+    from datetime import datetime
+    raw = text_value(value)
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def median_interval_minutes(timestamps: list[str]) -> float | None:
+    """Median of positive intervals between chronologically distinct events."""
+    parsed = sorted(
+        dt for dt in (parse_timestamp(value) for value in timestamps)
+        if dt is not None
+    )
+    if len(parsed) < 2:
+        return None
+
+    intervals = [
+        (b - a).total_seconds() / 60.0
+        for a, b in zip(parsed, parsed[1:])
+        if b > a
+    ]
+    if not intervals:
+        return None
+
+    intervals.sort()
+    middle = len(intervals) // 2
+    if len(intervals) % 2:
+        return intervals[middle]
+    return (intervals[middle - 1] + intervals[middle]) / 2.0
+
+
+def own_advert_events(
+    rx: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+    selected_key: str,
+) -> tuple[list[str], list[str]]:
+    """
+    Identify unique own advert events by linking decoded advert observations
+    to ADVERT packets through packet_payload_sha256.
+
+    Direct advert: RT 2, packet hop 0.
+    Flood advert:  RT 0. Receptions of the same payload hash are one event;
+                   the earliest packet timestamp is used.
+    """
+    selected_key = norm(selected_key)
+
+    hashes = {
+        norm(row.get("packet_payload_sha256"))
+        for row in observations
+        if norm(row.get("public_key")) == selected_key
+        and norm(row.get("source_type")) == "advert"
+        and norm(row.get("packet_payload_sha256"))
+    }
+
+    by_hash: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rx:
+        payload_hash = norm(row.get("packet_payload_sha256"))
+        if (
+            payload_hash in hashes
+            and norm(row.get("payload_type")) == "advert"
+        ):
+            by_hash[payload_hash].append(row)
+
+    direct_times: list[str] = []
+    flood_times: list[str] = []
+
+    for rows in by_hash.values():
+        direct_rows = [
+            row for row in rows
+            if route_type(row) == RT_DIRECT
+            and to_int(row.get("hop_count")) == 0
+        ]
+        flood_rows = [
+            row for row in rows
+            if route_type(row) == RT_TRANSPORT_FLOOD
+        ]
+
+        if direct_rows:
+            direct_times.append(
+                min(text_value(row.get("ts")) for row in direct_rows)
+            )
+        if flood_rows:
+            flood_times.append(
+                min(text_value(row.get("ts")) for row in flood_rows)
+            )
+
+    return sorted(direct_times), sorted(flood_times)
+
+
 def build_ranking(
     rx: list[dict[str, Any]],
     resolver: ContactResolver,
@@ -922,18 +1023,18 @@ def analyze(
         - len(direct)
     )
 
-    own_adverts = [
-        row for row in rx
-        if advert_public_key_from_payload(row) == selected.public_key
-    ]
-
-    own_adverts_flood = sum(
-        1 for row in own_adverts
-        if route_type(row) == RT_FLOOD
+    own_direct_advert_times, own_flood_advert_times = own_advert_events(
+        rx,
+        observations,
+        selected.public_key,
     )
-    own_adverts_direct = sum(
-        1 for row in own_adverts
-        if route_type(row) == RT_DIRECT
+    own_adverts_direct = len(own_direct_advert_times)
+    own_adverts_flood = len(own_flood_advert_times)
+    own_adverts_direct_interval = median_interval_minutes(
+        own_direct_advert_times
+    )
+    own_adverts_flood_interval = median_interval_minutes(
+        own_flood_advert_times
     )
 
     ranking, rank_by_key = build_ranking(rx, resolver)
@@ -970,7 +1071,9 @@ def analyze(
         repeater_name=selected.adv_name or "(ohne Namen)",
         repeater_public_key=selected.public_key,
         own_adverts_flood=own_adverts_flood,
+        own_adverts_flood_interval_minutes=own_adverts_flood_interval,
         own_adverts_direct=own_adverts_direct,
+        own_adverts_direct_interval_minutes=own_adverts_direct_interval,
         repeater_total_packets=total,
         repeater_rank=rank_by_key.get(selected.public_key),
         repeater_rank_total=len(ranking),
@@ -1138,6 +1241,22 @@ def format_period_de(value: str) -> str:
         return value
 
 
+def fmt_minutes(value: float | None) -> str:
+    if value is None:
+        return "–"
+    rounded = round(value)
+    if abs(value - rounded) < 0.05:
+        return f"{rounded} min"
+    return f"{value:.1f}".replace(".", ",") + " min"
+
+
+def fmt_hours_from_minutes(value: float | None) -> str:
+    if value is None:
+        return "–"
+    hours = value / 60.0
+    return f"{hours:.1f}".replace(".", ",") + " h"
+
+
 def render_html(
     metrics: Metrics,
     neighbors: list[NeighborInfo],
@@ -1145,12 +1264,6 @@ def render_html(
     ranking: list[tuple[str, int]],
     contacts: list[Contact],
 ) -> str:
-
-    rank_text = (
-        "–"
-        if metrics.repeater_rank is None
-        else f"{metrics.repeater_rank} / {metrics.repeater_rank_total}"
-    )
 
     period_text = (
         f"{format_period_de(metrics.period_from)} – "
@@ -1163,6 +1276,7 @@ def render_html(
         ("Receiver Public Key", metrics.receiver_id),
         ("Gesamtpakete", fmt_int(metrics.total_packets)),
         ("Direkt gehörte Repeater", fmt_int(metrics.directly_heard_repeaters)),
+        ("Repeater im beobachteten Mesh", fmt_int(metrics.repeater_rank_total)),
     ]
 
     receiver_html = "".join(
@@ -1178,68 +1292,91 @@ def render_html(
     )
 
     repeater_kpis = [
-        ("Pakete über diesen Repeater", fmt_int(metrics.repeater_total_packets)),
-        ("Rang", rank_text),
+        (
+            "Pakete über diesen Repeater",
+            fmt_int(metrics.repeater_total_packets),
+            "Pakete",
+        ),
+        (
+            "Rang im beobachteten Mesh",
+            "–" if metrics.repeater_rank is None else str(metrics.repeater_rank),
+            "" if metrics.repeater_rank is None else f"von {metrics.repeater_rank_total} Repeatern",
+        ),
         (
             "Unscoped",
-            f"{fmt_pct(metrics.unscoped_percent)} · {fmt_int(metrics.unscoped_packets)} Pakete",
+            fmt_pct(metrics.unscoped_percent),
+            f"{fmt_int(metrics.unscoped_packets)} Pakete",
         ),
         (
             "Scoped",
-            f"{fmt_pct(metrics.scoped_percent)} · {fmt_int(metrics.scoped_packets)} Pakete",
+            fmt_pct(metrics.scoped_percent),
+            f"{fmt_int(metrics.scoped_packets)} Pakete",
         ),
         (
             "Direct",
-            f"{fmt_pct(metrics.direct_percent)} · {fmt_int(metrics.direct_packets)} Pakete",
+            fmt_pct(metrics.direct_percent),
+            f"{fmt_int(metrics.direct_packets)} Pakete",
         ),
-        ("Max. Hops am Repeater", fmt_int(metrics.max_hops)),
+        (
+            "Max. Hops am Repeater",
+            fmt_int(metrics.max_hops),
+            "Hops",
+        ),
         (
             "Max. Unscoped-Hops",
             fmt_int(metrics.max_hops_unscoped),
+            "Hops",
         ),
         (
             "Max. Hops weitergeleiteter Adverts",
             fmt_int(metrics.max_hops_forwarded_adverts),
+            "Hops",
         ),
     ]
 
     repeater_kpi_html = "".join(
         f"""
         <div class="kpi">
-          <div class="kpi-value">{esc(value)}</div>
+          <div class="kpi-value">{esc(main_value)}</div>
+          <div class="kpi-subvalue">{esc(sub_value)}</div>
           <div class="kpi-label">{esc(label)}</div>
         </div>
         """
-        for label, value in repeater_kpis
+        for label, main_value, sub_value in repeater_kpis
     )
 
-    advert_rows = "".join([
-        metric_row("Eigene Flood-Adverts (RT 1)", fmt_int(metrics.own_adverts_flood)),
-        metric_row("Eigene direkte Adverts (RT 2)", fmt_int(metrics.own_adverts_direct)),
-        metric_row(
-            "Max. Hops weitergeleiteter Adverts",
-            fmt_int(metrics.max_hops_forwarded_adverts),
+    advert_cards = [
+        (
+            "Eigene Direct-Adverts",
+            fmt_int(metrics.own_adverts_direct),
+            "Advert-Ereignisse gehört",
+            f"Typischer Abstand {fmt_minutes(metrics.own_adverts_direct_interval_minutes)}",
         ),
-    ])
+        (
+            "Eigene Flood-Adverts",
+            fmt_int(metrics.own_adverts_flood),
+            "Advert-Ereignisse gehört",
+            f"Typischer Abstand {fmt_hours_from_minutes(metrics.own_adverts_flood_interval_minutes)}",
+        ),
+        (
+            "Weitergeleitete Adverts",
+            "–" if metrics.max_hops_forwarded_adverts is None else str(metrics.max_hops_forwarded_adverts),
+            "Max. Hops am Repeater",
+            "höchste beobachtete Hop-Position",
+        ),
+    ]
 
-    routing_rows = "".join([
-        metric_row(
-            "Unscoped Pakete (RT 1)",
-            f"{fmt_int(metrics.unscoped_packets)} · {fmt_pct(metrics.unscoped_percent)}",
-        ),
-        metric_row(
-            "Scoped Pakete (RT 0/3)",
-            f"{fmt_int(metrics.scoped_packets)} · {fmt_pct(metrics.scoped_percent)}",
-        ),
-        metric_row(
-            "Direct Pakete (RT 2)",
-            f"{fmt_int(metrics.direct_packets)} · {fmt_pct(metrics.direct_percent)}",
-        ),
-        metric_row(
-            "Sonstige/unklare Routingtypen",
-            fmt_int(metrics.other_route_packets),
-        ),
-    ])
+    advert_cards_html = "".join(
+        f"""
+        <div class="advert-card">
+          <div class="advert-label">{esc(label)}</div>
+          <div class="advert-value">{esc(value)}</div>
+          <div class="advert-subvalue">{esc(subvalue)}</div>
+          <div class="advert-detail">{esc(detail)}</div>
+        </div>
+        """
+        for label, value, subvalue, detail in advert_cards
+    )
 
     if neighbors:
         neighbor_rows = []
@@ -1412,6 +1549,10 @@ h2 {{
   margin-top:0;
   margin-bottom:16px;
 }}
+.rank-explainer {{
+  margin-top:10px;
+  font-size:.86rem;
+}}
 .kpi-grid {{
   display:grid;
   grid-template-columns:repeat(4,minmax(0,1fr));
@@ -1425,14 +1566,54 @@ h2 {{
   min-height:104px;
 }}
 .kpi-value {{
-  font-size:1.55rem;
+  font-size:1.7rem;
   font-weight:700;
-  line-height:1.15;
-  margin-bottom:8px;
+  line-height:1.08;
+  margin-bottom:4px;
+}}
+.kpi-subvalue {{
+  color:var(--muted);
+  font-size:.88rem;
+  line-height:1.2;
+  min-height:1.1em;
+  margin-bottom:10px;
 }}
 .kpi-label {{
   color:var(--muted);
+  font-size:.86rem;
+}}
+.advert-grid {{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:12px;
+  margin-top:14px;
+}}
+.advert-card {{
+  border:1px solid var(--line);
+  border-radius:9px;
+  padding:16px;
+  background:var(--soft2);
+  min-height:128px;
+}}
+.advert-label {{
+  color:var(--muted);
+  font-size:.86rem;
+  margin-bottom:8px;
+}}
+.advert-value {{
+  font-size:1.7rem;
+  font-weight:700;
+  line-height:1.08;
+  margin-bottom:4px;
+}}
+.advert-subvalue {{
+  color:var(--muted);
   font-size:.88rem;
+  margin-bottom:10px;
+}}
+.advert-detail {{
+  font-size:.9rem;
+  font-weight:600;
 }}
 .two-col {{
   display:grid;
@@ -1550,20 +1731,20 @@ summary {{
   <div class="kpi-grid">
     {repeater_kpi_html}
   </div>
+  <p class="section-intro rank-explainer">
+    Der Rang basiert auf der Anzahl der Pakete, in deren beobachtetem Pfad
+    der Repeater eindeutig erkannt wurde.
+  </p>
 </section>
 
-<section class="two-col">
-  <div>
-    <h2>Adverts</h2>
-    <table>
-      <tbody>{advert_rows}</tbody>
-    </table>
-  </div>
-  <div>
-    <h2>Routing-Verteilung</h2>
-    <table>
-      <tbody>{routing_rows}</tbody>
-    </table>
+<section>
+  <h2>Adverts</h2>
+  <p class="section-intro">
+    Die Advert-Auswertung zeigt das beobachtete Aussendeverhalten des Repeaters
+    sowie seine Beteiligung an der Weiterleitung von Adverts im Mesh.
+  </p>
+  <div class="advert-grid">
+    {advert_cards_html}
   </div>
 </section>
 
@@ -1588,16 +1769,63 @@ summary {{
   <summary>Methodik und technische Kontrolle</summary>
   <div class="details-inner">
     <h2>Methodik</h2>
+
     <p class="small muted">
-      Unscoped = ausschließlich RT 1 (Flood). Scoped = RT 0 und RT 3.
+      <strong>Routingtypen:</strong>
+      Unscoped bezeichnet ausschließlich Flood-Pakete des Routing-Typs RT 1.
+      Scoped umfasst die Routing-Typen RT 0 und RT 3.
       RT 2 (Direct) wird separat ausgewiesen.
-      „Max. Hops am Repeater“ wird aus der Position des untersuchten Repeaters
-      in <span class="mono">mc_rx.nodes</span> berechnet.
-      „Max. Hops weitergeleiteter Adverts“ betrachtet alle ADVERT-Pakete, in
-      deren Pfad der untersuchte Repeater eindeutig vorkommt, und verwendet
-      ebenfalls dessen Position im Pfad.
-      Mehrdeutige Path-Präfixe werden dem ausgewählten Repeater nicht
-      zugerechnet.
+    </p>
+
+    <p class="small muted">
+      <strong>Hop-Auswertung:</strong>
+      „Max. Hops am Repeater“ beschreibt die Position des untersuchten Repeaters
+      innerhalb des beobachteten Paketpfades. Damit wird die Hop-Anzahl zum
+      Zeitpunkt der Weiterleitung durch den Repeater betrachtet und nicht die
+      Länge des später vollständig beobachteten Pfades.
+    </p>
+
+    <p class="small muted">
+      <strong>Path-Hash-Auswertung:</strong>
+      Für die Zuordnung eines Pakets zu einem Repeater wird die im Paket
+      verwendete Path-Hash-Länge berücksichtigt. 1-, 2- und 3-Byte-Path-Hashes
+      werden ausgewertet. Ein Paket wird dem untersuchten Repeater jedoch nur
+      dann zugerechnet, wenn der verwendete Public-Key-Präfix unter den bekannten
+      Repeatern eindeutig ist. Mehrdeutige Präfixe werden nicht berücksichtigt.
+    </p>
+
+    <p class="small muted">
+      <strong>Beobachtete Mesh-Größe:</strong>
+      Die Anzahl „Repeater im beobachteten Mesh“ umfasst alle Repeater, die im
+      Beobachtungszeitraum in Paketpfaden eindeutig identifiziert werden
+      konnten. Sie ist nicht mit der Anzahl der direkt gehörten Repeater
+      gleichzusetzen und bildet zugleich die Grundgesamtheit für den Rang des
+      untersuchten Repeaters.
+    </p>
+
+    <p class="small muted">
+      <strong>Advert-Auswertung:</strong>
+      Eigene Direct-Adverts werden als direkt gehörte Advert-Ereignisse des
+      untersuchten Repeaters ausgewertet. Eigene Flood-Adverts werden anhand
+      ihres Advert-Inhalts dem untersuchten Repeater zugeordnet. Mehrfach über
+      verschiedene Wege empfangene Kopien desselben Flood-Adverts zählen dabei
+      nur als ein Advert-Ereignis. Der typische Abstand ist der Median der
+      Zeitabstände zwischen aufeinanderfolgenden eindeutig erkannten
+      Advert-Ereignissen. Bei weniger als zwei Ereignissen wird kein Abstand
+      angegeben.
+    </p>
+
+    <p class="small muted">
+      <strong>Repeater-Nachbarn:</strong>
+      Als Nachbar gilt ausschließlich der Repeater, der im beobachteten
+      Paketpfad unmittelbar vor dem untersuchten Repeater steht.
+    </p>
+
+    <p class="small muted">
+      <strong>Advert-Hop-Auswertung:</strong>
+      „Max. Hops weitergeleiteter Adverts“ betrachtet alle Advert-Pakete, die
+      über den untersuchten Repeater weitergeleitet wurden, und gibt die höchste
+      dabei beobachtete Hop-Position am Repeater an.
     </p>
 
     <h2>Rangliste – Kontrolle</h2>
@@ -1610,7 +1838,7 @@ summary {{
 </details>
 
 <footer class="footer">
-  PacketTap / QuestDB · Report v0.9
+  PacketTap / QuestDB · Report v0.16
 </footer>
 
 </body>
@@ -1625,7 +1853,7 @@ summary {{
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="MeshCore PacketTap Repeater Report v0.9"
+        description="MeshCore PacketTap Repeater Report v0.16"
     )
 
     p.add_argument(
