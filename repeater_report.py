@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap - Repeater Report v0.16
+MeshCore PacketTap - Repeater Report v0.29
 =========================================
 
 Direkt auf das dokumentierte QuestDB-Datenmodell von meshcore-packettap
@@ -42,6 +42,18 @@ Wichtige Definitionen
     Contact-Observations und den zugehörigen ADVERT-Paketen.
     Direct = RT 2 bei Hop 0; Flood = RT 0, pro Payload-Hash einmal.
     Der typische Abstand ist der Median zwischen eindeutigen Advert-Ereignissen.
+- Bewertungshinweise:
+    Richtwerte: flood.max <= 16; flood.max.unscoped = 3
+    (bei exponierten Standorten kann 0 sinnvoll sein); flood.max.advert = 3;
+    advert.interval > 210 min gilt als günstig, 239 min empfohlen,
+    maximal einstellbar 240 min; flood.advert.interval ist von 3-168 h
+    einstellbar und >= 70 h empfohlen. Vielfache von 24 h sollten zur
+    Kollisionsvermeidung vermieden werden.
+    Für die Bewertung der Path-Hash-Größe werden ausschließlich eigene
+    Flood-Adverts (RT 0) verwendet; Direct-Adverts (RT 2) bleiben außen vor.
+    Für eigene Flood-Adverts werden 2- oder 3-Byte-Path-Hashes empfohlen;
+    path.hash.mode 0 entspricht 1 Byte, Wert 1 entspricht 2 Byte.
+    Die Hinweise bewerten beobachtetes Verhalten, nicht ausgelesene Konfiguration.
 
 Abhängigkeiten:
     Nur Python-Standardbibliothek.
@@ -145,6 +157,8 @@ class Metrics:
 
     direct_packets: int
     direct_percent: float
+
+    own_advert_path_hash_sizes: tuple[int, ...]
 
     other_route_packets: int
 
@@ -880,6 +894,40 @@ def own_advert_events(
     return sorted(direct_times), sorted(flood_times)
 
 
+
+def own_advert_path_hash_sizes(
+    rx: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+    selected_key: str,
+) -> tuple[int, ...]:
+    """Observed path_hash_size values of own flood adverts (RT 0).
+
+    Direct adverts (RT 2) are deliberately excluded: their observed
+    path_hash_size is not used to assess path.hash.mode. Advert ownership is
+    linked through public_key + packet_payload_sha256; only matching ADVERT
+    packets with payload_route_type 0 contribute to this metric.
+    """
+    selected_key = norm(selected_key)
+    hashes = {
+        norm(row.get("packet_payload_sha256"))
+        for row in observations
+        if norm(row.get("public_key")) == selected_key
+        and norm(row.get("source_type")) == "advert"
+        and norm(row.get("packet_payload_sha256"))
+    }
+
+    sizes = {
+        size
+        for row in rx
+        if norm(row.get("payload_type")) == "advert"
+        and to_int(row.get("payload_route_type")) == 0
+        and norm(row.get("packet_payload_sha256")) in hashes
+        for size in [to_int(row.get("path_hash_size"))]
+        if size in (1, 2, 3)
+    }
+    return tuple(sorted(sizes))
+
+
 def build_ranking(
     rx: list[dict[str, Any]],
     resolver: ContactResolver,
@@ -941,7 +989,7 @@ def build_neighbors(
                 candidates = len(matches)
             else:
                 identity = f"unknown:{path_id}"
-                public_key = f"(unaufgelöst: {path_id})"
+                public_key = path_id
                 name = "–"
                 ambiguous = False
                 candidates = 0
@@ -1036,6 +1084,11 @@ def analyze(
     own_adverts_flood_interval = median_interval_minutes(
         own_flood_advert_times
     )
+    advert_hash_sizes = own_advert_path_hash_sizes(
+        rx,
+        observations,
+        selected.public_key,
+    )
 
     ranking, rank_by_key = build_ranking(rx, resolver)
 
@@ -1083,6 +1136,7 @@ def analyze(
         scoped_percent=(100 * len(scoped) / denom) if total else 0.0,
         direct_packets=len(direct),
         direct_percent=(100 * len(direct) / denom) if total else 0.0,
+        own_advert_path_hash_sizes=advert_hash_sizes,
         other_route_packets=other,
         max_hops=max_or_none(
             hop_at_repeater(r, selected.public_key, resolver)
@@ -1257,6 +1311,193 @@ def fmt_hours_from_minutes(value: float | None) -> str:
     return f"{hours:.1f}".replace(".", ",") + " h"
 
 
+def assessment_html(kind: str, text: str) -> str:
+    if not text:
+        return ""
+    labels = {
+        "positive": "Positiv",
+        "warning": "Auffällig",
+        "info": "Hinweis",
+    }
+    label = labels.get(kind, "Hinweis")
+    return (
+        f"<div class='assessment assessment-{esc(kind)}'>"
+        f"<strong>{esc(label)}:</strong> {esc(text)}"
+        "</div>"
+    )
+
+
+
+def fmt_hash_sizes(values: tuple[int, ...]) -> str:
+    if not values:
+        return "–"
+    return " / ".join(f"{value} Byte" for value in values)
+
+
+def assess_advert_hash_sizes(values: tuple[int, ...]) -> tuple[str, str]:
+    if not values:
+        return (
+            "info",
+            "Für eigene Adverts konnte im Beobachtungszeitraum keine "
+            "Path-Hash-Größe bestimmt werden.",
+        )
+    if len(values) > 1:
+        rendered = fmt_hash_sizes(values)
+        if 1 in values:
+            return (
+                "warning",
+                f"Bei eigenen Flood-Adverts wurden unterschiedliche Path-Hash-Größen "
+                f"beobachtet ({rendered}), darunter 1 Byte. Empfohlen werden "
+                "2 oder 3 Byte. Prüfe path.hash.mode "
+                "(0 = 1 Byte, 1 = 2 Byte).",
+            )
+        return (
+            "info",
+            f"Bei eigenen Flood-Adverts wurden unterschiedliche Path-Hash-Größen "
+            f"beobachtet ({rendered}). Empfohlen werden 2 oder 3 Byte; eine "
+            "Änderung innerhalb des Beobachtungszeitraums ist möglich.",
+        )
+    value = values[0]
+    if value in (2, 3):
+        return (
+            "positive",
+            f"Die eigenen Flood-Adverts verwenden einen {value}-Byte-Path-Hash. "
+            "Empfohlen werden 2 oder 3 Byte.",
+        )
+    return (
+        "warning",
+        "Die eigenen Flood-Adverts verwenden einen 1-Byte-Path-Hash. Empfohlen "
+        "werden 2 oder 3 Byte. Prüfe path.hash.mode "
+        "(0 = 1 Byte, 1 = 2 Byte).",
+    )
+
+
+
+def assess_flood_max(value: int | None) -> tuple[str, str]:
+    if value is None:
+        return "", ""
+    if value <= 16:
+        return ("positive", f"Das beobachtete Maximum von {value} Hops liegt innerhalb der Empfehlung flood.max ≤ 16.")
+    return ("warning", f"Es wurden bis zu {value} Hops am Repeater beobachtet. Empfohlen wird flood.max ≤ 16.")
+
+
+def assess_unscoped_max(value: int | None) -> tuple[str, str]:
+    if value is None:
+        return "", ""
+    if value == 0:
+        return (
+            "info",
+            "Unscoped-Pakete wurden nur bei Hop 0 beobachtet. "
+            "Für Repeater auf exponierten Standorten kann "
+            "flood.max.unscoped = 0 bewusst sinnvoll sein.",
+        )
+    if value <= 3:
+        return (
+            "positive",
+            f"Das beobachtete Maximum von {value} Hops überschreitet den "
+            "empfohlenen Wert flood.max.unscoped = 3 nicht.",
+        )
+    return (
+        "warning",
+        f"Unscoped-Pakete wurden mit bis zu {value} Hops am Repeater "
+        "beobachtet. Empfohlen wird flood.max.unscoped = 3.",
+    )
+
+
+def assess_advert_max(value: int | None) -> tuple[str, str]:
+    if value is None:
+        return "", ""
+    if value <= 3:
+        return (
+            "positive",
+            f"Weitergeleitete Adverts wurden mit maximal {value} Hops am "
+            "Repeater beobachtet. Das entspricht dem Richtwert "
+            "flood.max.advert = 3 bzw. liegt darunter.",
+        )
+    return (
+        "warning",
+        f"Adverts wurden mit bis zu {value} Hops am Repeater beobachtet. "
+        "Als Richtwert wird flood.max.advert = 3 empfohlen.",
+    )
+
+
+def assess_direct_advert_interval(value: float | None) -> tuple[str, str]:
+    if value is None:
+        return "", ""
+    if value > 210:
+        return (
+            "positive",
+            f"Der typische beobachtete Abstand beträgt {fmt_minutes(value)}. "
+            "Werte über 210 min gelten als günstig; empfohlen sind 239 min "
+            "(maximal einstellbar: 240 min).",
+        )
+    return (
+        "warning",
+        f"Der typische beobachtete Abstand beträgt {fmt_minutes(value)}. "
+        "Für advert.interval gelten Werte über 210 min als günstig; empfohlen "
+        "sind 239 min (maximal einstellbar: 240 min). Empfangslücken können "
+        "den beobachteten Abstand beeinflussen.",
+    )
+
+
+def assess_flood_advert_interval(
+    event_count: int,
+    value: float | None,
+) -> tuple[str, str]:
+    if event_count == 0:
+        return (
+            "info",
+            "Im Beobachtungszeitraum wurden keine eigenen Flood-Adverts erkannt. "
+            "Es liegen daher keine Daten zur Beurteilung des Flood-Advert-Intervalls vor. "
+            "Möglicherweise wurden keine Flood-Adverts empfangen oder der Versand ist "
+            "mit flood.advert.interval = 0 deaktiviert. Bei aktiviertem Versand werden "
+            "≥ 70 h empfohlen; einstellbar sind 3–168 h.",
+        )
+
+    if event_count == 1:
+        return (
+            "info",
+            "Im Beobachtungszeitraum wurde nur ein eigenes Flood-Advert erkannt. "
+            "Damit kann kein typischer Abstand bestimmt und das Flood-Advert-Intervall "
+            "nicht bewertet werden. Bei aktiviertem Versand werden ≥ 70 h empfohlen; "
+            "einstellbar sind 3–168 h.",
+        )
+
+    if value is None:
+        return (
+            "info",
+            "Es wurden mehrere eigene Flood-Adverts erkannt, aber kein typischer "
+            "Abstand konnte bestimmt werden.",
+        )
+
+    hours = value / 60.0
+    nearest_multiple = round(hours / 24.0) * 24.0
+    near_24_multiple = nearest_multiple >= 24.0 and abs(hours - nearest_multiple) <= 1.0
+
+    if hours >= 70.0:
+        if near_24_multiple:
+            return (
+                "info",
+                f"Der typische beobachtete Abstand beträgt {fmt_hours_from_minutes(value)} "
+                "und erfüllt die Empfehlung von mindestens 70 h. Er liegt jedoch "
+                "nahe an einem Vielfachen von 24 h; solche Einstellungen sollten "
+                "zur Kollisionsvermeidung vermieden werden.",
+            )
+        return (
+            "positive",
+            f"Der typische beobachtete Abstand beträgt {fmt_hours_from_minutes(value)} "
+            "und liegt damit innerhalb der Empfehlung flood.advert.interval ≥ 70 h.",
+        )
+
+    return (
+        "warning",
+        f"Der typische beobachtete Abstand beträgt {fmt_hours_from_minutes(value)} "
+        "und liegt unter der Empfehlung flood.advert.interval ≥ 70 h. "
+        "Einstellbar sind 3–168 h. Der beobachtete Abstand muss nicht exakt "
+        "der Konfiguration entsprechen.",
+    )
+
+
 def render_html(
     metrics: Metrics,
     neighbors: list[NeighborInfo],
@@ -1296,41 +1537,43 @@ def render_html(
             "Pakete über diesen Repeater",
             fmt_int(metrics.repeater_total_packets),
             "Pakete",
+            ("", ""),
         ),
         (
             "Rang im beobachteten Mesh",
             "–" if metrics.repeater_rank is None else str(metrics.repeater_rank),
             "" if metrics.repeater_rank is None else f"von {metrics.repeater_rank_total} Repeatern",
+            ("", ""),
         ),
         (
             "Unscoped",
             fmt_pct(metrics.unscoped_percent),
             f"{fmt_int(metrics.unscoped_packets)} Pakete",
+            ("", ""),
         ),
         (
             "Scoped",
             fmt_pct(metrics.scoped_percent),
             f"{fmt_int(metrics.scoped_packets)} Pakete",
+            ("", ""),
         ),
         (
-            "Direct",
-            fmt_pct(metrics.direct_percent),
-            f"{fmt_int(metrics.direct_packets)} Pakete",
+            "Path-Hash eigener Flood-Adverts",
+            fmt_hash_sizes(metrics.own_advert_path_hash_sizes),
+            "beobachtete Hash-Größe",
+            assess_advert_hash_sizes(metrics.own_advert_path_hash_sizes),
         ),
         (
             "Max. Hops am Repeater",
             fmt_int(metrics.max_hops),
             "Hops",
+            assess_flood_max(metrics.max_hops),
         ),
         (
             "Max. Unscoped-Hops",
             fmt_int(metrics.max_hops_unscoped),
             "Hops",
-        ),
-        (
-            "Max. Hops weitergeleiteter Adverts",
-            fmt_int(metrics.max_hops_forwarded_adverts),
-            "Hops",
+            assess_unscoped_max(metrics.max_hops_unscoped),
         ),
     ]
 
@@ -1340,9 +1583,10 @@ def render_html(
           <div class="kpi-value">{esc(main_value)}</div>
           <div class="kpi-subvalue">{esc(sub_value)}</div>
           <div class="kpi-label">{esc(label)}</div>
+          {assessment_html(*assessment)}
         </div>
         """
-        for label, main_value, sub_value in repeater_kpis
+        for label, main_value, sub_value, assessment in repeater_kpis
     )
 
     advert_cards = [
@@ -1351,18 +1595,26 @@ def render_html(
             fmt_int(metrics.own_adverts_direct),
             "Advert-Ereignisse gehört",
             f"Typischer Abstand {fmt_minutes(metrics.own_adverts_direct_interval_minutes)}",
+            assess_direct_advert_interval(
+                metrics.own_adverts_direct_interval_minutes
+            ),
         ),
         (
             "Eigene Flood-Adverts",
             fmt_int(metrics.own_adverts_flood),
             "Advert-Ereignisse gehört",
             f"Typischer Abstand {fmt_hours_from_minutes(metrics.own_adverts_flood_interval_minutes)}",
+            assess_flood_advert_interval(
+                metrics.own_adverts_flood,
+                metrics.own_adverts_flood_interval_minutes,
+            ),
         ),
         (
             "Weitergeleitete Adverts",
             "–" if metrics.max_hops_forwarded_adverts is None else str(metrics.max_hops_forwarded_adverts),
             "Max. Hops am Repeater",
             "höchste beobachtete Hop-Position",
+            assess_advert_max(metrics.max_hops_forwarded_adverts),
         ),
     ]
 
@@ -1373,9 +1625,10 @@ def render_html(
           <div class="advert-value">{esc(value)}</div>
           <div class="advert-subvalue">{esc(subvalue)}</div>
           <div class="advert-detail">{esc(detail)}</div>
+          {assessment_html(*assessment)}
         </div>
         """
-        for label, value, subvalue, detail in advert_cards
+        for label, value, subvalue, detail, assessment in advert_cards
     )
 
     if neighbors:
@@ -1404,6 +1657,11 @@ def render_html(
 
         neighbors_html = f"""
         <table class="neighbors-table">
+          <colgroup>
+            <col class="neighbor-col-name">
+            <col class="neighbor-col-count">
+            <col class="neighbor-col-key">
+          </colgroup>
           <thead>
             <tr>
               <th>Repeater</th>
@@ -1431,10 +1689,15 @@ def render_html(
             )
         gt3_html = f"""
         <p class="section-intro">
-          Diese Nachbarn wurden bei unscoped Flood-Paketen (RT 1) mit mehr
-          als drei Hops am untersuchten Repeater beobachtet.
+          Diese Nachbarn wurden bei unscoped Flood-Paketen mit mehr als
+          drei Hops am untersuchten Repeater beobachtet.
         </p>
-        <table>
+        <table class="neighbors-table">
+          <colgroup>
+            <col class="neighbor-col-name">
+            <col class="neighbor-col-count">
+            <col class="neighbor-col-key">
+          </colgroup>
           <thead>
             <tr>
               <th>Repeater</th>
@@ -1514,6 +1777,12 @@ h2 {{
   max-width:850px;
   margin-top:0;
 }}
+.methodology-intro {{
+  color:var(--muted);
+  max-width:none;
+  width:100%;
+  margin-top:0;
+}}
 .receiver-grid {{
   display:grid;
   grid-template-columns:repeat(3,minmax(0,1fr));
@@ -1582,6 +1851,18 @@ h2 {{
   color:var(--muted);
   font-size:.86rem;
 }}
+.advert-subsection {{
+  margin-top:28px;
+  padding-top:20px;
+  border-top:1px solid var(--line);
+}}
+.advert-subsection h3 {{
+  margin:0 0 6px;
+  font-size:1.08rem;
+}}
+.advert-intro {{
+  margin-bottom:0;
+}}
 .advert-grid {{
   display:grid;
   grid-template-columns:repeat(3,minmax(0,1fr));
@@ -1615,6 +1896,22 @@ h2 {{
   font-size:.9rem;
   font-weight:600;
 }}
+.assessment {{
+  margin-top:12px;
+  padding-top:9px;
+  border-top:1px solid var(--line);
+  font-size:.82rem;
+  line-height:1.35;
+}}
+.assessment-positive {{
+  color:#246b3c;
+}}
+.assessment-warning {{
+  color:#9a4c00;
+}}
+.assessment-info {{
+  color:var(--muted);
+}}
 .two-col {{
   display:grid;
   grid-template-columns:1fr 1fr;
@@ -1625,6 +1922,15 @@ table {{
   border-collapse:collapse;
   margin:10px 0 18px;
 }}
+
+.neighbors-table {{
+  width:100%;
+  table-layout:fixed;
+}}
+.neighbors-table .neighbor-col-name {{ width:73%; }}
+.neighbors-table .neighbor-col-count {{ width:8%; }}
+.neighbors-table .neighbor-col-key {{ width:19%; }}
+
 th,td {{
   border-bottom:1px solid var(--line);
   padding:9px 8px;
@@ -1714,8 +2020,7 @@ summary {{
 <section>
   <h2>Beobachtung</h2>
   <p class="section-intro">
-    Diese Angaben beschreiben den PacketTap-Receiver und den betrachteten
-    Beobachtungszeitraum.
+    Diese Angaben beschreiben den Beobachtungsstandort und den ausgewerteten Zeitraum.
   </p>
   <div class="receiver-grid">
     {receiver_html}
@@ -1731,20 +2036,15 @@ summary {{
   <div class="kpi-grid">
     {repeater_kpi_html}
   </div>
-  <p class="section-intro rank-explainer">
-    Der Rang basiert auf der Anzahl der Pakete, in deren beobachtetem Pfad
-    der Repeater eindeutig erkannt wurde.
-  </p>
-</section>
-
-<section>
-  <h2>Adverts</h2>
-  <p class="section-intro">
-    Die Advert-Auswertung zeigt das beobachtete Aussendeverhalten des Repeaters
-    sowie seine Beteiligung an der Weiterleitung von Adverts im Mesh.
-  </p>
-  <div class="advert-grid">
-    {advert_cards_html}
+  <div class="advert-subsection">
+    <h3>Advert-Verhalten</h3>
+    <p class="section-intro advert-intro">
+      Die folgenden Kennzahlen zeigen das beobachtete Aussendeverhalten des
+      Repeaters sowie seine Beteiligung an der Weiterleitung von Adverts im Mesh.
+    </p>
+    <div class="advert-grid">
+      {advert_cards_html}
+    </div>
   </div>
 </section>
 
@@ -1765,10 +2065,45 @@ summary {{
   {gt3_html}
 </section>
 
-<details>
-  <summary>Methodik und technische Kontrolle</summary>
-  <div class="details-inner">
-    <h2>Methodik</h2>
+<section>
+  <h2>Methodik der Auswertung</h2>
+
+  <p class="methodology-intro">
+    Dieser Report bewertet das im Beobachtungszeitraum tatsächlich sichtbare
+    Verhalten des untersuchten Repeaters. Die Kennzahlen werden aus empfangenen
+    Paketen, deren beobachteten Pfaden und den darin erkannten Repeatern
+    abgeleitet.
+  </p>
+
+  <p class="methodology-intro">
+    Grundlage der Auswertung sind ausschließlich Pakete und Repeater-Aktivitäten,
+    die vom angegebenen Receiver im Beobachtungszeitraum empfangen wurden.
+    Vorgänge im Mesh, die der Receiver nicht empfangen hat, können entsprechend
+    nicht in die Auswertung einfließen.
+  </p>
+
+  <p class="methodology-intro">
+    Die Ergebnisse stellen keine direkt ausgelesene Repeater-Konfiguration dar.
+    Empfangslücken, nicht eindeutig auflösbare Path-IDs und außerhalb des
+    Empfangsbereichs liegende Übertragungen können die beobachteten Werte
+    beeinflussen.
+  </p>
+
+  <p class="methodology-intro">
+    Die folgenden Erläuterungen beschreiben, wie die wesentlichen Kennzahlen
+    des Reports ermittelt und bewertet werden.
+  </p>
+
+  <div class="methodology">
+    <p class="small muted">
+      <strong>Bewertungshinweise:</strong>
+      Positive Hinweise, Hinweise und Auffälligkeiten vergleichen das
+      beobachtete Verhalten mit empfohlenen Richtwerten für ein gut
+      funktionierendes Mesh. Sie stellen keine direkte Auslesung der
+      Repeater-Konfiguration dar. Insbesondere können beobachtete
+      Advert-Abstände durch nicht empfangene Pakete größer als das tatsächlich
+      konfigurierte Intervall erscheinen.
+    </p>
 
     <p class="small muted">
       <strong>Routingtypen:</strong>
@@ -1804,6 +2139,16 @@ summary {{
     </p>
 
     <p class="small muted">
+      <strong>Path-Hash eigener Flood-Adverts:</strong>
+      Bewertet wird ausschließlich die bei eigenen Flood-Adverts (RT 0)
+      beobachtete Path-Hash-Größe. Direct-Adverts (RT 2) werden hierfür
+      bewusst nicht verwendet. Empfohlen werden 2 oder 3 Byte. Bei 1 Byte
+      wird auf <code>path.hash.mode</code> hingewiesen
+      (0 = 1 Byte, 1 = 2 Byte). Unterschiedliche beobachtete Größen können
+      auf eine Änderung innerhalb des Beobachtungszeitraums hindeuten.
+    </p>
+
+    <p class="small muted">
       <strong>Advert-Auswertung:</strong>
       Eigene Direct-Adverts werden als direkt gehörte Advert-Ereignisse des
       untersuchten Repeaters ausgewertet. Eigene Flood-Adverts werden anhand
@@ -1828,17 +2173,16 @@ summary {{
       dabei beobachtete Hop-Position am Repeater an.
     </p>
 
-    <h2>Rangliste – Kontrolle</h2>
     <p class="small muted">
-      Top 20 der eindeutig über Path-ID-Präfixe aufgelösten Repeater.
-      Ein Repeater wird pro Paket maximal einmal gezählt.
+      <strong>Rang des Repeaters:</strong>
+      Der Rang basiert auf der Anzahl der Pakete, in deren beobachtetem Pfad
+      der Repeater eindeutig erkannt wurde.
     </p>
-    {ranking_table(ranking, contacts, metrics.repeater_public_key)}
   </div>
-</details>
+</section>
 
 <footer class="footer">
-  PacketTap / QuestDB · Report v0.16
+  PacketTap / QuestDB · Report v0.29 · Auswertungstool von DH8IAT
 </footer>
 
 </body>
@@ -1853,7 +2197,7 @@ summary {{
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="MeshCore PacketTap Repeater Report v0.16"
+        description="MeshCore PacketTap Repeater Report v0.29"
     )
 
     p.add_argument(
