@@ -1,0 +1,23 @@
+{
+  "questdb_host": "192.168.1.2",
+  "questdb_port": 9000,
+  "receiver_name": "My PacketTap Receiver",
+  "receiver_id": "",
+  "output_dir": "reports",
+  "web_host": "127.0.0.1",
+  "web_port": 8080,
+  "receiver_script": "receiver.py",
+  "receiver_args": [
+    "--append"
+  ],
+  "receiver_lock": "state/receiver.lock",
+  "receiver_stop": "state/receiver.stop",
+  "importer_script": "packettap_importer.py",
+  "importer_args": [
+    "--follow"
+  ],
+  "importer_lock": "state/importer.lock",
+  "importer_stop": "state/importer.stop",
+  "log_dir": "logs",
+  "importer_state": "state/importer.state"
+}

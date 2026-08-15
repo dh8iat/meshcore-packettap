@@ -1,27 +1,26 @@
-# Python
-.venv/
-__pycache__/
-*.pyc
-*.pyo
+# Local PacketTap configuration
+report_config.json
 
-# Captures / runtime data
+# Runtime state
+state/
+logs/
+reports/
+
+# PacketTap captures
 packettap_capture.bin
 packettap_capture.log
 packettap_stream.bin
-*.log
 
-# Backups
-*.zip
+# Python
+__pycache__/
+*.py[cod]
 
-# Local/private configuration
-public_channel_keys.json
+# Local environments
+.venv/
+venv/
 
-# IDE / OS
+# Editor / OS files
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-state/
-
-# Generated repeater reports
-reports/
