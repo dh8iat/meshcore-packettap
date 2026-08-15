@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import json
 import signal
+import sys
 import struct
 import time
 import zlib
@@ -39,6 +40,8 @@ HELLO_LENGTH_TABLE_SIZE_V2 = 6
 MAX_PAYLOAD_SIZE = 4096
 MAX_HELLO_PAYLOAD_SIZE = 4096
 READ_SIZE = 65536
+DEFAULT_STOP_FILE = Path("state/receiver.stop")
+DEFAULT_LOCK_FILE = Path("state/receiver.lock")
 
 
 @dataclass(frozen=True)
@@ -562,7 +565,7 @@ class CaptureServer:
             "Unterstützt: PKTH v1/v2 (HELLO) + PKTP v1 (Radio Frames)"
         )
         print(
-            "Beenden mit q + Enter, Strg+C oder Strg+Pause.\n"
+            "Beenden mit q + Enter, Strg+C, Strg+Pause oder Stop-Datei.\n"
         )
 
         watchdog = asyncio.create_task(self.duration_watchdog())
@@ -583,6 +586,19 @@ class CaptureServer:
                 pass
 
 
+async def stop_file_monitor(
+    server: CaptureServer,
+    stop_file: Path,
+) -> None:
+    """Stop cleanly when an external controller creates stop_file."""
+    while not server.stop_event.is_set():
+        if stop_file.is_file():
+            print(f"\n[STOP] Stop-Datei erkannt: {stop_file}")
+            server.request_stop()
+            return
+        await asyncio.sleep(0.25)
+
+
 async def keyboard_monitor(server: CaptureServer) -> None:
     """Wait for q, quit or exit and stop the server cleanly."""
     while not server.stop_event.is_set():
@@ -595,6 +611,113 @@ async def keyboard_monitor(server: CaptureServer) -> None:
             print("\n[STOP] Beenden angefordert.")
             server.request_stop()
             return
+
+
+
+
+_INSTANCE_LOCK_HANDLE = None
+
+
+def acquire_instance_lock(lock_file: Path, program_name: str) -> None:
+    """Hold a real OS file lock for the complete process lifetime."""
+    global _INSTANCE_LOCK_HANDLE
+    import json
+    import os
+    import time
+
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_file.open("a+", encoding="utf-8")
+
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            handle.seek(0, 2)
+            if handle.tell() == 0:
+                handle.write(" ")
+                handle.flush()
+
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"{program_name} läuft bereits. "
+                    "Zweite Instanz wird nicht gestartet."
+                ) from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(
+                    handle.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except OSError as exc:
+                raise RuntimeError(
+                    f"{program_name} läuft bereits. "
+                    "Zweite Instanz wird nicht gestartet."
+                ) from exc
+
+        handle.seek(0)
+        handle.truncate()
+        json.dump(
+            {
+                "pid": os.getpid(),
+                "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            },
+            handle,
+        )
+        handle.write("\n")
+        handle.flush()
+
+        _INSTANCE_LOCK_HANDLE = handle
+        print(
+            f"[LOCK] Instanz-Lock aktiv: "
+            f"{lock_file} (PID {os.getpid()})"
+        )
+    except Exception:
+        handle.close()
+        raise
+
+
+def release_instance_lock(lock_file: Path) -> None:
+    """Release the OS lock held by this process."""
+    global _INSTANCE_LOCK_HANDLE
+
+    handle = _INSTANCE_LOCK_HANDLE
+    if handle is None:
+        return
+
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            handle.seek(0)
+            try:
+                msvcrt.locking(
+                    handle.fileno(),
+                    msvcrt.LK_UNLCK,
+                    1,
+                )
+            except OSError:
+                pass
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(
+                    handle.fileno(),
+                    fcntl.LOCK_UN,
+                )
+            except OSError:
+                pass
+    finally:
+        handle.close()
+        _INSTANCE_LOCK_HANDLE = None
+        print(
+            f"[LOCK] Instanz-Lock freigegeben: {lock_file}"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -637,6 +760,21 @@ def parse_args() -> argparse.Namespace:
         help="Nach N Sekunden stoppen",
     )
     parser.add_argument(
+        "--lock-file",
+        type=Path,
+        default=DEFAULT_LOCK_FILE,
+        help="Single-Instance-Lock (Standard: {})".format(DEFAULT_LOCK_FILE),
+    )
+    parser.add_argument(
+        "--stop-file",
+        type=Path,
+        default=DEFAULT_STOP_FILE,
+        help=(
+            "Datei für einen geordneten externen Stop "
+            f"(Standard: {DEFAULT_STOP_FILE})"
+        ),
+    )
+    parser.add_argument(
         "--max-payload",
         type=int,
         default=MAX_PAYLOAD_SIZE,
@@ -650,6 +788,12 @@ def parse_args() -> argparse.Namespace:
 
 
 async def async_main(args: argparse.Namespace) -> None:
+    try:
+        acquire_instance_lock(args.lock_file, "receiver.py")
+    except RuntimeError as exc:
+        print(f"[START] {exc}")
+        return
+
     files = CaptureFiles(
         args.output_dir,
         append=args.append,
@@ -665,8 +809,18 @@ async def async_main(args: argparse.Namespace) -> None:
     )
 
     loop = asyncio.get_running_loop()
+    # Remove a stale request from an earlier run. A stop file is a command,
+    # not persistent state, and must never stop a newly started receiver.
+    try:
+        args.stop_file.unlink()
+    except FileNotFoundError:
+        pass
+
     keyboard_task = asyncio.create_task(
         keyboard_monitor(server)
+    )
+    stop_file_task = asyncio.create_task(
+        stop_file_monitor(server, args.stop_file)
     )
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -683,13 +837,25 @@ async def async_main(args: argparse.Namespace) -> None:
 
     finally:
         keyboard_task.cancel()
+        stop_file_task.cancel()
 
         try:
             await keyboard_task
         except asyncio.CancelledError:
             pass
 
+        try:
+            await stop_file_task
+        except asyncio.CancelledError:
+            pass
+
+        try:
+            args.stop_file.unlink()
+        except FileNotFoundError:
+            pass
+
         files.close()
+        release_instance_lock(args.lock_file)
 
         print(
             f"\nFertig: {server.frame_count} Frames aus "

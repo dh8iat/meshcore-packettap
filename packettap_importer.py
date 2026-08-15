@@ -8,6 +8,7 @@ import ast
 import asyncio
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,114 @@ DEFAULT_QUESTDB_PORT = 9000
 DEFAULT_CHECKPOINT_FILE = Path("state/importer.state")
 DEFAULT_CHECKPOINT_ROWS = 100
 DEFAULT_CHECKPOINT_SECONDS = 5.0
+DEFAULT_STOP_FILE = Path("state/importer.stop")
+DEFAULT_LOCK_FILE = Path("state/importer.lock")
+
+
+
+_INSTANCE_LOCK_HANDLE = None
+
+
+def acquire_instance_lock(lock_file: Path, program_name: str) -> None:
+    """Hold a real OS file lock for the complete process lifetime."""
+    global _INSTANCE_LOCK_HANDLE
+    import json
+    import os
+    import time
+
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_file.open("a+", encoding="utf-8")
+
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            handle.seek(0, 2)
+            if handle.tell() == 0:
+                handle.write(" ")
+                handle.flush()
+
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"{program_name} läuft bereits. "
+                    "Zweite Instanz wird nicht gestartet."
+                ) from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(
+                    handle.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except OSError as exc:
+                raise RuntimeError(
+                    f"{program_name} läuft bereits. "
+                    "Zweite Instanz wird nicht gestartet."
+                ) from exc
+
+        handle.seek(0)
+        handle.truncate()
+        json.dump(
+            {
+                "pid": os.getpid(),
+                "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            },
+            handle,
+        )
+        handle.write("\n")
+        handle.flush()
+
+        _INSTANCE_LOCK_HANDLE = handle
+        print(
+            f"[LOCK] Instanz-Lock aktiv: "
+            f"{lock_file} (PID {os.getpid()})"
+        )
+    except Exception:
+        handle.close()
+        raise
+
+
+def release_instance_lock(lock_file: Path) -> None:
+    """Release the OS lock held by this process."""
+    global _INSTANCE_LOCK_HANDLE
+
+    handle = _INSTANCE_LOCK_HANDLE
+    if handle is None:
+        return
+
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            handle.seek(0)
+            try:
+                msvcrt.locking(
+                    handle.fileno(),
+                    msvcrt.LK_UNLCK,
+                    1,
+                )
+            except OSError:
+                pass
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(
+                    handle.fileno(),
+                    fcntl.LOCK_UN,
+                )
+            except OSError:
+                pass
+    finally:
+        handle.close()
+        _INSTANCE_LOCK_HANDLE = None
+        print(
+            f"[LOCK] Instanz-Lock freigegeben: {lock_file}"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,6 +225,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--lock-file",
+        type=Path,
+        default=DEFAULT_LOCK_FILE,
+        help=(
+            "Single-Instance-Lock "
+            f"(default: {DEFAULT_LOCK_FILE})"
+        ),
+    )
+    parser.add_argument(
+        "--stop-file",
+        type=Path,
+        default=DEFAULT_STOP_FILE,
+        help=(
+            "Datei für einen geordneten externen Stop "
+            f"(default: {DEFAULT_STOP_FILE})"
+        ),
+    )
+    parser.add_argument(
         "--no-checkpoint",
         action="store_true",
         help="Disable persistent checkpointing in --follow mode.",
@@ -133,6 +260,7 @@ async def iter_json_lines(
     *,
     follow: bool,
     start_offset: int,
+    stop_file: Path | None = None,
 ) -> AsyncIterator[tuple[int, str, int]]:
     """Yield line number, text and byte offset immediately after the line."""
     with path.open("rb") as handle:
@@ -153,6 +281,9 @@ async def iter_json_lines(
                 continue
 
             if not follow:
+                break
+
+            if stop_file is not None and stop_file.is_file():
                 break
 
             await asyncio.sleep(0.25)
@@ -328,6 +459,20 @@ def print_record(
 
 
 async def run_import(args: argparse.Namespace) -> int:
+    try:
+        acquire_instance_lock(
+            args.lock_file,
+            "packettap_importer.py",
+        )
+    except RuntimeError as exc:
+        print(f"[START] {exc}")
+        return 2
+
+    try:
+        args.stop_file.unlink()
+    except FileNotFoundError:
+        pass
+
     if not args.capture_file.is_file():
         raise SystemExit(
             f"Capture file not found: {args.capture_file}"
@@ -428,6 +573,7 @@ async def run_import(args: argparse.Namespace) -> int:
             args.capture_file,
             follow=args.follow,
             start_offset=start_offset,
+            stop_file=args.stop_file if args.follow else None,
         ):
             line_db_dirty = False
             text = line.strip()
@@ -650,6 +796,15 @@ async def run_import(args: argparse.Namespace) -> int:
                 db_dirty=line_db_dirty,
             )
 
+        if args.follow and args.stop_file.is_file():
+            print(
+                f"\n[STOP] Stop-Datei erkannt: "
+                f"{args.stop_file}"
+            )
+            print(
+                "[STOP] Importer wird geordnet beendet."
+            )
+
     except KeyboardInterrupt:
         print("\nImport beendet.")
     finally:
@@ -681,6 +836,13 @@ async def run_import(args: argparse.Namespace) -> int:
                     pass
 
         configure_writer(None)
+
+        try:
+            args.stop_file.unlink()
+        except FileNotFoundError:
+            pass
+
+        release_instance_lock(args.lock_file)
 
     print(
         f"\nFertig: {imported} Datensätze verarbeitet, "
