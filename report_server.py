@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.9
+MeshCore PacketTap Web UI v0.12
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
@@ -43,7 +43,7 @@ from typing import Any
 import repeater_report as rr
 
 
-APP_VERSION = "0.9"
+APP_VERSION = "0.12"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
 
@@ -65,6 +65,9 @@ DEFAULT_CONFIG = {
     "importer_stop": "state/importer.stop",
     "log_dir": "logs",
     "importer_state": "state/importer.state",
+    "dashboard_refresh_seconds": 15,
+    "auto_start_receiver": True,
+    "auto_start_importer": True,
 }
 
 
@@ -96,6 +99,16 @@ def load_config() -> dict[str, Any]:
     config["receiver_stop"] = str(config.get("receiver_stop", "state/receiver.stop")).strip() or "state/receiver.stop"
     config["importer_lock"] = str(config.get("importer_lock", "state/importer.lock")).strip() or "state/importer.lock"
     config["importer_stop"] = str(config.get("importer_stop", "state/importer.stop")).strip() or "state/importer.stop"
+    config["dashboard_refresh_seconds"] = max(
+        0,
+        int(config.get("dashboard_refresh_seconds", 15)),
+    )
+    config["auto_start_receiver"] = bool(
+        config.get("auto_start_receiver", True)
+    )
+    config["auto_start_importer"] = bool(
+        config.get("auto_start_importer", True)
+    )
 
     def normalize_args(value: Any) -> list[str]:
         if value is None:
@@ -542,6 +555,7 @@ def start_script(
         f"\n--- Start durch PacketTap Web UI v{APP_VERSION} ---\n"
         f"Kommando: {' '.join(command)}\n"
         "Python I/O: UTF-8\n"
+        f"Detached: {'ja' if sys.platform.startswith('win') else 'session'}\n"
     )
     log_handle.flush()
 
@@ -557,7 +571,12 @@ def start_script(
         "env": child_env,
     }
 
-    if not sys.platform.startswith("win"):
+    if sys.platform.startswith("win"):
+        kwargs["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.DETACHED_PROCESS
+        )
+    else:
         kwargs["start_new_session"] = True
 
     try:
@@ -647,7 +666,53 @@ def checkpoint_status(config: dict[str, Any]) -> tuple[str, str]:
         return "Fehler", f"{path}: {exc}"
 
 
-def latest_packet_status(config: dict[str, Any]) -> str:
+def format_local_datetime(value: str) -> tuple[str, float | None]:
+    """Format an ISO-8601 timestamp in the host's local timezone."""
+    import datetime
+
+    raw = str(value).strip()
+    if not raw:
+        return "–", None
+
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        local = dt.astimezone()
+        age_seconds = max(
+            0.0,
+            (datetime.datetime.now().astimezone() - local).total_seconds(),
+        )
+        return local.strftime("%d.%m.%Y · %H:%M:%S"), age_seconds
+    except Exception:
+        return str(value), None
+
+
+def format_age(age_seconds: float | None) -> str:
+    if age_seconds is None:
+        return ""
+
+    seconds = int(max(0, age_seconds))
+    if seconds < 5:
+        return "gerade eben"
+    if seconds < 60:
+        return f"vor {seconds} s"
+
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"vor {minutes} min"
+
+    hours = minutes // 60
+    if hours < 24:
+        return f"vor {hours} h"
+
+    days = hours // 24
+    return f"vor {days} d"
+
+
+def latest_packet_status(config: dict[str, Any]) -> tuple[str, str, float | None]:
     query = urllib.parse.quote("select max(ts) latest_ts from mc_rx")
     url = f"http://{config['questdb_host']}:{config['questdb_port']}/exec?query={query}"
     try:
@@ -655,10 +720,80 @@ def latest_packet_status(config: dict[str, Any]) -> str:
             data = json.loads(response.read().decode("utf-8"))
         dataset = data.get("dataset") or []
         if dataset and dataset[0] and dataset[0][0]:
-            return str(dataset[0][0])
-        return "keine Paketdaten"
+            formatted, age = format_local_datetime(str(dataset[0][0]))
+            return formatted, format_age(age), age
+        return "keine Paketdaten", "", None
     except Exception as exc:
-        return f"nicht ermittelbar: {exc}"
+        return f"nicht ermittelbar: {exc}", "", None
+
+
+def log_activity(
+    config: dict[str, Any],
+    script_name: str,
+    label: str,
+) -> tuple[str, str, float | None]:
+    """Return latest visible sequence number and log-file activity age."""
+    path = script_log_path(config, script_name)
+
+    if not path.is_file():
+        return f"{label}: –", "Noch keine Logdatei", None
+
+    try:
+        import datetime
+
+        stat = path.stat()
+        changed = datetime.datetime.fromtimestamp(stat.st_mtime).astimezone()
+        age_seconds = max(
+            0.0,
+            (datetime.datetime.now().astimezone() - changed).total_seconds(),
+        )
+
+        with path.open("rb") as handle:
+            size = handle.seek(0, 2)
+            handle.seek(max(0, size - 32768))
+            tail = handle.read().decode("utf-8", errors="replace")
+
+        numbers = re.findall(r"(?m)^\[(\d+)\]\s", tail)
+        sequence = numbers[-1] if numbers else None
+
+        main = f"{label} #{sequence}" if sequence else f"{label}: –"
+        detail = (
+            f"{changed.strftime('%d.%m.%Y · %H:%M:%S')}"
+            f" · {format_age(age_seconds)}"
+        )
+        return main, detail, age_seconds
+
+    except Exception as exc:
+        return f"{label}: –", f"nicht ermittelbar: {exc}", None
+
+
+def pipeline_state(
+    db_ok: bool,
+    receiver_ok: bool,
+    importer_ok: bool,
+    packet_age: float | None,
+    receiver_age: float | None,
+    importer_age: float | None,
+) -> tuple[bool, str, str]:
+    if not db_ok:
+        return False, "Störung", "QuestDB ist nicht erreichbar."
+    if not receiver_ok:
+        return False, "Störung", "Receiver ist nicht aktiv."
+    if not importer_ok:
+        return False, "Störung", "Importer ist nicht aktiv."
+
+    ages = [
+        age
+        for age in (packet_age, receiver_age, importer_age)
+        if age is not None
+    ]
+    if ages and max(ages) <= 60:
+        return True, "Aktuell", "Receiver, Importer und Datenbank sind aktiv."
+
+    if packet_age is not None and packet_age > 300:
+        return False, "Keine aktuelle Aktivität", "Seit mehr als 5 Minuten kein neues Paket in QuestDB."
+
+    return True, "Aktiv", "Dienste laufen; aktuell ist nur geringe oder keine Paketaktivität sichtbar."
 
 
 def questdb_status(config: dict[str, Any]) -> tuple[bool, str]:
@@ -672,41 +807,70 @@ def questdb_status(config: dict[str, Any]) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def dashboard_page(config: dict[str, Any], message: str = "", error: bool = False) -> bytes:
+def dashboard_page(
+    config: dict[str, Any],
+    message: str = "",
+    error: bool = False,
+) -> bytes:
     db_ok, db_detail = questdb_status(config)
-    latest = latest_packet_status(config) if db_ok else "–"
+    packet_time, packet_age_text, packet_age = (
+        latest_packet_status(config)
+        if db_ok
+        else ("–", "", None)
+    )
+
     receiver_script = config["receiver_script"]
     importer_script = config["importer_script"]
+
     receiver_ok, receiver_detail = service_status(config["receiver_lock"])
     importer_ok, importer_detail = service_status(config["importer_lock"])
-    checkpoint_state, checkpoint_detail = checkpoint_status(config)
+
+    receiver_activity, receiver_activity_detail, receiver_age = log_activity(
+        config,
+        receiver_script,
+        "Frame",
+    )
+    importer_activity, importer_activity_detail, importer_age = log_activity(
+        config,
+        importer_script,
+        "Import",
+    )
+
+    pipeline_ok, pipeline_label, pipeline_detail = pipeline_state(
+        db_ok,
+        receiver_ok,
+        importer_ok,
+        packet_age,
+        receiver_age,
+        importer_age,
+    )
 
     def status_card(
         title: str,
         ok: bool,
+        state: str,
+        main: str,
         detail: str,
         service: str | None = None,
-        extra: str = "",
-        state_text: str | None = None,
     ) -> str:
-        state = state_text or ("Läuft" if ok else "Gestoppt")
         cls = "ok" if ok else "error"
         controls = ""
+
         if service:
-            restart = '<button name="action" value="restart" type="submit">Neustarten</button>'
             controls = f"""
             <form class="controls" method="post" action="/service">
               <input type="hidden" name="service" value="{esc(service)}">
               <button name="action" value="start" type="submit">Starten</button>
               <button name="action" value="stop" type="submit">Geordnet stoppen</button>
-              {restart}
+              <button name="action" value="restart" type="submit">Neustarten</button>
             </form>"""
+
         return f"""
         <div class="status-card">
           <div class="status-title">{esc(title)}</div>
           <div class="status-value {cls}">{esc(state)}</div>
+          <div class="activity-main">{esc(main)}</div>
           <div class="help">{esc(detail)}</div>
-          {extra}
           {controls}
         </div>"""
 
@@ -715,62 +879,88 @@ def dashboard_page(config: dict[str, Any], message: str = "", error: bool = Fals
         cls = "error" if error else "ok"
         msg_html = f'<div class="message {cls}">{esc(message)}</div>'
 
-    db_extra = f'<div class="help"><strong>Letztes Paket:</strong> {esc(latest)}</div>'
+    refresh_seconds = int(config.get("dashboard_refresh_seconds", 15))
+    refresh_text = (
+        f"Automatische Aktualisierung: {refresh_seconds} s"
+        if refresh_seconds > 0
+        else "Automatische Aktualisierung: aus"
+    )
+
+    quest_main = packet_time
+    quest_detail = db_detail
+    if packet_age_text:
+        quest_detail += f" · {packet_age_text}"
+
     body = f"""
 {msg_html}
 <div class="card">
-  <h2>PacketTap Übersicht</h2>
-  <p class="help">
-    Zustand der Datenbank und der PacketTap-Prozesse. Die Steuerung nutzt
-    die getesteten OS-Locks und Stop-Dateien. Stoppen und Neustarten erfolgen
-    geordnet; ein harter Prozessabbruch wird nicht verwendet.
-  </p>
+  <div class="dashboard-heading">
+    <div>
+      <h2>PacketTap Übersicht</h2>
+      <p class="help">
+        Betriebszustand und letzte sichtbare Aktivität der PacketTap-Pipeline.
+      </p>
+    </div>
+    <div class="refresh-note">{esc(refresh_text)}</div>
+  </div>
+
+  <div class="pipeline-banner {'ok' if pipeline_ok else 'error'}">
+    <strong>Pipeline: {esc(pipeline_label)}</strong>
+    <span>{esc(pipeline_detail)}</span>
+  </div>
+
   <div class="status-grid">
     {status_card(
         "QuestDB",
         db_ok,
-        db_detail,
-        extra=db_extra,
-        state_text="OK" if db_ok else "Nicht erreichbar",
+        "OK" if db_ok else "Nicht erreichbar",
+        quest_main,
+        quest_detail,
     )}
-    {status_card(Path(receiver_script).name, receiver_ok, receiver_detail, "receiver")}
-    {status_card(Path(importer_script).name, importer_ok, importer_detail, "importer")}
+    {status_card(
+        Path(receiver_script).name,
+        receiver_ok,
+        "Läuft" if receiver_ok else "Gestoppt",
+        receiver_activity,
+        receiver_activity_detail + (
+            f" · {receiver_detail}" if receiver_detail else ""
+        ),
+        "receiver",
+    )}
+    {status_card(
+        Path(importer_script).name,
+        importer_ok,
+        "Läuft" if importer_ok else "Gestoppt",
+        importer_activity,
+        importer_activity_detail + (
+            f" · {importer_detail}" if importer_detail else ""
+        ),
+        "importer",
+    )}
   </div>
 
-  <div class="card" style="margin-top:14px;margin-bottom:0">
-    <div class="status-title">Importer Checkpoint</div>
-    <div><strong>{esc(checkpoint_state)}</strong></div>
-    <div class="help">{esc(checkpoint_detail)}</div>
-    <div class="help">
-      Die Weboberfläche verändert oder löscht die Checkpoint-Datei nicht.
-    </div>
-  </div>
-
-  <div class="log-grid">
-    <div class="log-card">
-      <div class="status-title">Log · {esc(Path(receiver_script).name)}</div>
-      <pre>{esc(tail_log(config, receiver_script))}</pre>
-    </div>
-    <div class="log-card">
-      <div class="status-title">Log · {esc(Path(importer_script).name)}</div>
-      <pre>{esc(tail_log(config, importer_script))}</pre>
-    </div>
-  </div>
-  <div style="margin-top:16px">
-    <a class="button" href="/">Status aktualisieren</a>
+  <div class="dashboard-actions">
+    <a class="button" href="/">Jetzt aktualisieren</a>
+    <a class="button secondary" href="/settings">Refresh einstellen</a>
   </div>
 </div>
 """
-    return page("PacketTap Übersicht", body)
+    return page(
+        "PacketTap Übersicht",
+        body,
+        refresh_seconds=refresh_seconds,
+    )
 
 
 
-def page(title: str, body: str) -> bytes:
+
+def page(title: str, body: str, refresh_seconds: int = 0) -> bytes:
     doc = f"""<!doctype html>
 <html lang="de">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+{f'<meta http-equiv="refresh" content="{refresh_seconds}">' if refresh_seconds > 0 else ''}
 <title>{esc(title)}</title>
 <style>
 :root {{
@@ -875,6 +1065,44 @@ button:hover, .button:hover {{ opacity:.88; }}
 .status-value {{ font-size:1.15rem; font-weight:700; margin-bottom:5px; }}
 .status-value.ok {{ color:var(--ok); }}
 .status-value.error {{ color:var(--err); }}
+.activity-main {{
+  font-size:1rem;
+  font-weight:700;
+  margin:8px 0 4px;
+}}
+.dashboard-heading {{
+  display:flex;
+  justify-content:space-between;
+  gap:20px;
+  align-items:flex-start;
+}}
+.refresh-note {{
+  color:var(--muted);
+  font-size:.82rem;
+  white-space:nowrap;
+  margin-top:7px;
+}}
+.pipeline-banner {{
+  display:flex;
+  gap:10px;
+  align-items:baseline;
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:11px 13px;
+  margin:16px 0;
+  background:var(--soft);
+}}
+.pipeline-banner.ok strong {{ color:var(--ok); }}
+.pipeline-banner.error strong {{ color:var(--err); }}
+.dashboard-actions {{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-top:16px;
+}}
+.button.secondary {{
+  background:#666;
+}}
 .controls {{
   display:flex;
   flex-wrap:wrap;
@@ -923,6 +1151,10 @@ footer {{
   nav {{ margin-top:12px; }}
   nav a {{ margin-left:0; margin-right:16px; }}
   .grid, .status-grid, .log-grid {{ grid-template-columns:1fr; }}
+  .dashboard-heading {{ display:block; }}
+  .refresh-note {{ margin-top:10px; white-space:normal; }}
+  .pipeline-banner {{ display:block; }}
+  .pipeline-banner span {{ display:block; margin-top:4px; }}
 }}
 </style>
 </head>
@@ -1146,6 +1378,37 @@ def settings_page(
 
     <div class="grid">
       <div class="field">
+        <label>
+          <input type="checkbox"
+                 name="auto_start_receiver"
+                 value="1"
+                 {'checked' if config['auto_start_receiver'] else ''}>
+          Receiver beim Start der Weboberfläche automatisch starten
+        </label>
+      </div>
+      <div class="field">
+        <label>
+          <input type="checkbox"
+                 name="auto_start_importer"
+                 value="1"
+                 {'checked' if config['auto_start_importer'] else ''}>
+          Importer beim Start der Weboberfläche automatisch starten
+        </label>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="dashboard_refresh_seconds">Dashboard Refresh (Sekunden)</label>
+      <input id="dashboard_refresh_seconds"
+             name="dashboard_refresh_seconds"
+             type="number"
+             min="0"
+             value="{esc(config['dashboard_refresh_seconds'])}" required>
+      <div class="help">0 = automatische Aktualisierung deaktiviert.</div>
+    </div>
+
+    <div class="grid">
+      <div class="field">
         <label for="web_host">Web Host</label>
         <input id="web_host" name="web_host"
                value="{esc(config['web_host'])}" required>
@@ -1165,6 +1428,54 @@ def settings_page(
 </div>
 """
     return page("Einstellungen", body)
+
+
+def auto_start_services(config: dict[str, Any]) -> None:
+    """Start missing PacketTap services in safe dependency order."""
+    import time
+
+    if config.get("auto_start_receiver", True):
+        running, _ = service_status(config["receiver_lock"])
+        if not running:
+            message = start_script(
+                config["receiver_script"],
+                config["receiver_args"],
+                config["receiver_lock"],
+                config["receiver_stop"],
+                config,
+            )
+            print(f"[WEB] Auto-Start Receiver: {message}")
+
+    # Give the receiver a brief chance to acquire its lock before importer start.
+    if config.get("auto_start_importer", True):
+        if config.get("auto_start_receiver", True):
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                receiver_running, _ = service_status(config["receiver_lock"])
+                if receiver_running:
+                    break
+                time.sleep(0.15)
+
+        running, _ = service_status(config["importer_lock"])
+        if not running:
+            message = start_script(
+                config["importer_script"],
+                config["importer_args"],
+                config["importer_lock"],
+                config["importer_stop"],
+                config,
+            )
+            print(f"[WEB] Auto-Start Importer: {message}")
+
+
+def dashboard_redirect_url(message: str = "", error: bool = False) -> str:
+    params: dict[str, str] = {}
+    if message:
+        params["message"] = message
+    if error:
+        params["error"] = "1"
+    query = urllib.parse.urlencode(params)
+    return "/" + (f"?{query}" if query else "")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1210,7 +1521,19 @@ class Handler(BaseHTTPRequestHandler):
             config = load_config()
 
             if path == "/":
-                self.send_html(dashboard_page(config))
+                query = urllib.parse.parse_qs(
+                    parsed.query,
+                    keep_blank_values=True,
+                )
+                message = query.get("message", [""])[-1]
+                error = query.get("error", ["0"])[-1] == "1"
+                self.send_html(
+                    dashboard_page(
+                        config,
+                        message=message,
+                        error=error,
+                    )
+                )
                 return
 
             if path == "/report":
@@ -1317,7 +1640,10 @@ class Handler(BaseHTTPRequestHandler):
                         message = stop_message + " " + start_message
                 else:
                     raise RuntimeError("Unbekannte Aktion.")
-                self.send_html(dashboard_page(config, message))
+
+                self.redirect(
+                    dashboard_redirect_url(message)
+                )
                 return
 
             if path == "/settings":
@@ -1354,6 +1680,15 @@ class Handler(BaseHTTPRequestHandler):
                         "importer_stop",
                         "state/importer.stop",
                     ).strip(),
+                    "dashboard_refresh_seconds": int(
+                        data.get("dashboard_refresh_seconds", "15")
+                    ),
+                    "auto_start_receiver": (
+                        data.get("auto_start_receiver") == "1"
+                    ),
+                    "auto_start_importer": (
+                        data.get("auto_start_importer") == "1"
+                    ),
                 }
 
                 import shlex
@@ -1437,9 +1772,11 @@ class Handler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             elif path == "/service":
-                self.send_html(
-                    dashboard_page(config, str(exc), error=True),
-                    HTTPStatus.BAD_REQUEST,
+                self.redirect(
+                    dashboard_redirect_url(
+                        str(exc),
+                        error=True,
+                    )
                 )
             else:
                 self.send_html(
@@ -1458,6 +1795,8 @@ def main() -> int:
     host = config["web_host"]
     port = config["web_port"]
 
+    auto_start_services(config)
+
     server = ThreadingHTTPServer((host, port), Handler)
 
     print(
@@ -1471,6 +1810,7 @@ def main() -> int:
         f"[WEB] Konfiguration: {CONFIG_FILE}"
     )
     print("[WEB] Beenden mit Strg+C")
+    print("[WEB] Receiver und Importer laufen dabei weiter.")
 
     try:
         server.serve_forever()

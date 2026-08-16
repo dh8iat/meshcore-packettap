@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap - Repeater Report v0.29
+MeshCore PacketTap - Repeater Report v0.31
 =========================================
 
 Direkt auf das dokumentierte QuestDB-Datenmodell von meshcore-packettap
@@ -19,8 +19,10 @@ Wichtige Definitionen
 - Scoped: wird in dieser Version als "nicht unscoped" NICHT automatisch
   interpretiert. Für die Kennzahl "Scoped" werden aktuell Transport-Routen
   payload_route_type IN (0, 3) verwendet.
-- Direct (payload_route_type = 2) wird separat behandelt und gehört weder
-  zu Unscoped noch zu Scoped.
+- Direct: payload_route_type = 2.
+- Für die Routing-Verteilung werden Scoped, Unscoped und Direct gemeinsam
+  auf 100 % normiert. Sonstige/unklare Routing-Typen werden nicht in diese
+  Prozentverteilung einbezogen.
 - Direkt gehörte Repeater:
     mc_contact_observations
     node_role = 'repeater'
@@ -1110,7 +1112,8 @@ def analyze(
     )
 
     total = len(repeater_rows)
-    denom = total or 1
+    classified_total = len(unscoped) + len(scoped) + len(direct)
+    denom = classified_total or 1
 
     metrics = Metrics(
         observer_location=observer_name,
@@ -1534,7 +1537,7 @@ def render_html(
 
     repeater_kpis = [
         (
-            "Pakete über diesen Repeater",
+            "Pakete mit Repeater im Pfad",
             fmt_int(metrics.repeater_total_packets),
             "Pakete",
             ("", ""),
@@ -1543,18 +1546,6 @@ def render_html(
             "Rang im beobachteten Mesh",
             "–" if metrics.repeater_rank is None else str(metrics.repeater_rank),
             "" if metrics.repeater_rank is None else f"von {metrics.repeater_rank_total} Repeatern",
-            ("", ""),
-        ),
-        (
-            "Unscoped",
-            fmt_pct(metrics.unscoped_percent),
-            f"{fmt_int(metrics.unscoped_packets)} Pakete",
-            ("", ""),
-        ),
-        (
-            "Scoped",
-            fmt_pct(metrics.scoped_percent),
-            f"{fmt_int(metrics.scoped_packets)} Pakete",
             ("", ""),
         ),
         (
@@ -1587,6 +1578,43 @@ def render_html(
         </div>
         """
         for label, main_value, sub_value, assessment in repeater_kpis
+    )
+
+    routing_cards = [
+        (
+            "Scoped",
+            fmt_pct(metrics.scoped_percent),
+            f"{fmt_int(metrics.scoped_packets)} Pakete",
+            "RT 0 + RT 3",
+            "Routing mit Scope/Region",
+        ),
+        (
+            "Unscoped",
+            fmt_pct(metrics.unscoped_percent),
+            f"{fmt_int(metrics.unscoped_packets)} Pakete",
+            "RT 1",
+            "Flood-Routing ohne Region",
+        ),
+        (
+            "Direct",
+            fmt_pct(metrics.direct_percent),
+            f"{fmt_int(metrics.direct_packets)} Pakete",
+            "RT 2",
+            "Direkte bzw. pfadbasierte Übertragung",
+        ),
+    ]
+
+    routing_cards_html = "".join(
+        f"""
+        <div class="routing-card">
+          <div class="routing-label">{esc(label)}</div>
+          <div class="routing-value">{esc(value)}</div>
+          <div class="routing-subvalue">{esc(subvalue)}</div>
+          <div class="routing-type">{esc(route_type_text)}</div>
+          <div class="routing-detail">{esc(detail)}</div>
+        </div>
+        """
+        for label, value, subvalue, route_type_text, detail in routing_cards
     )
 
     advert_cards = [
@@ -1851,6 +1879,57 @@ h2 {{
   color:var(--muted);
   font-size:.86rem;
 }}
+.routing-subsection {{
+  margin-top:28px;
+  padding-top:20px;
+  border-top:1px solid var(--line);
+}}
+.routing-subsection h3 {{
+  margin:0 0 6px;
+  font-size:1.08rem;
+}}
+.routing-intro {{
+  margin-bottom:0;
+}}
+.routing-grid {{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:12px;
+  margin-top:14px;
+}}
+.routing-card {{
+  border:1px solid var(--line);
+  border-radius:9px;
+  padding:16px;
+  background:var(--soft2);
+  min-height:150px;
+}}
+.routing-label {{
+  color:var(--muted);
+  font-size:.86rem;
+  margin-bottom:8px;
+}}
+.routing-value {{
+  font-size:1.7rem;
+  font-weight:700;
+  line-height:1.08;
+  margin-bottom:4px;
+}}
+.routing-subvalue {{
+  color:var(--muted);
+  font-size:.88rem;
+  margin-bottom:10px;
+}}
+.routing-type {{
+  font-size:.9rem;
+  font-weight:700;
+  margin-bottom:4px;
+}}
+.routing-detail {{
+  color:var(--muted);
+  font-size:.84rem;
+  line-height:1.35;
+}}
 .advert-subsection {{
   margin-top:28px;
   padding-top:20px;
@@ -1989,6 +2068,7 @@ summary {{
 @media (max-width:850px) {{
   .receiver-grid {{ grid-template-columns:1fr 1fr; }}
   .kpi-grid {{ grid-template-columns:1fr 1fr; }}
+  .routing-grid {{ grid-template-columns:1fr; }}
   .two-col {{ grid-template-columns:1fr; }}
 }}
 @media (max-width:520px) {{
@@ -2035,6 +2115,25 @@ summary {{
   </p>
   <div class="kpi-grid">
     {repeater_kpi_html}
+  </div>
+  <div class="routing-subsection">
+    <h3>Routing-Verhalten</h3>
+    <p class="section-intro routing-intro">
+      Die Routing-Typen zeigen, wie die Pakete geroutet wurden, in deren
+      beobachtetem Pfad der untersuchte Repeater vorkommt. Scoped, Unscoped
+      und Direct bilden gemeinsam 100&nbsp;% der eindeutig klassifizierten
+      Pakete.
+    </p>
+    <div class="routing-grid">
+      {routing_cards_html}
+    </div>
+    {(
+        f"<p class='small muted'>Hinweis: {fmt_int(metrics.other_route_packets)} "
+        "Pakete mit sonstigem oder nicht eindeutig klassifizierbarem Routing-Typ "
+        "sind nicht in der 100-%-Verteilung enthalten.</p>"
+        if metrics.other_route_packets > 0
+        else ""
+    )}
   </div>
   <div class="advert-subsection">
     <h3>Advert-Verhalten</h3>
@@ -2109,7 +2208,10 @@ summary {{
       <strong>Routingtypen:</strong>
       Unscoped bezeichnet ausschließlich Flood-Pakete des Routing-Typs RT 1.
       Scoped umfasst die Routing-Typen RT 0 und RT 3.
-      RT 2 (Direct) wird separat ausgewiesen.
+      Direct entspricht RT 2. Die Prozentwerte von Scoped, Unscoped und Direct
+      werden gemeinsam auf 100&nbsp;% normiert. Sonstige oder nicht eindeutig
+      klassifizierbare Routing-Typen werden nicht in diese Prozentverteilung
+      einbezogen.
     </p>
 
     <p class="small muted">
@@ -2182,7 +2284,7 @@ summary {{
 </section>
 
 <footer class="footer">
-  PacketTap / QuestDB · Report v0.29 · Auswertungstool von DH8IAT
+  PacketTap / QuestDB · Report v0.31 · Auswertungstool von DH8IAT
 </footer>
 
 </body>
@@ -2197,7 +2299,7 @@ summary {{
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="MeshCore PacketTap Repeater Report v0.29"
+        description="MeshCore PacketTap Repeater Report v0.31"
     )
 
     p.add_argument(
