@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.12
+MeshCore PacketTap Web UI v0.39
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
 
 Abhängigkeiten:
-    Nur Python-Standardbibliothek.
+    Python-Standardbibliothek. Für PDF-Speicherung wird lokal
+    Microsoft Edge oder Google Chrome verwendet.
 
 Voraussetzungen:
     - report_server.py und repeater_report.py liegen im selben Verzeichnis.
@@ -29,8 +30,16 @@ import html
 import json
 import os
 import re
+import mimetypes
 import sys
 import subprocess
+import shutil
+import time
+import uuid
+from datetime import date, timedelta
+from collections import Counter, defaultdict
+from statistics import median
+import math
 import urllib.request
 import urllib.error
 import unicodedata
@@ -41,11 +50,15 @@ from pathlib import Path
 from typing import Any
 
 import repeater_report as rr
+import mesh_report as mr
 
 
-APP_VERSION = "0.12"
+APP_VERSION = "0.39"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
+MAP_DIR = BASE_DIR / "map"
+REPORTS_DIR = BASE_DIR / "reports"
+PREVIEW_DIR = BASE_DIR / "state" / "report_preview"
 
 DEFAULT_CONFIG = {
     "questdb_host": "192.168.1.2",
@@ -218,7 +231,8 @@ def generate_report(
     repeater_query: str,
     date_from: str,
     date_to: str,
-) -> tuple[Path, rr.Contact]:
+) -> tuple[str, str, rr.Contact]:
+    """Build a repeater report preview without permanently saving it."""
     period_from = normalize_date(date_from, end=False)
     period_to = normalize_date(date_to, end=True)
 
@@ -247,7 +261,6 @@ def generate_report(
         receiver_name,
     )
 
-    # Beibehaltung derselben Datenmodell-Prüfung wie im CLI-Report.
     rr.load_adverts(
         db,
         period_from,
@@ -270,19 +283,395 @@ def generate_report(
         f"{date_from}_{date_to}.html"
     )
 
-    destination = output_dir(config) / filename
-    destination.write_text(
-        rr.render_html(
-            metrics,
-            neighbors,
-            neighbors_gt3,
-            ranking,
-            contacts,
+    report_html = rr.render_html(
+        metrics,
+        neighbors,
+        neighbors_gt3,
+        ranking,
+        contacts,
+    )
+
+    return report_html, filename, selected
+
+
+def generate_mesh_report(
+    config: dict[str, Any],
+    date_from: str,
+    date_to: str,
+) -> tuple[str, str]:
+    """Build a mesh report preview without permanently saving it."""
+    period_from = normalize_date(date_from, end=False)
+    period_to = normalize_date(date_to, end=True)
+
+    db = rr.QuestDB(
+        config["questdb_host"],
+        config["questdb_port"],
+    )
+
+    receiver_id = config.get("receiver_id") or None
+    receiver_name = config.get("receiver_name") or None
+
+    rows = mr.load_mesh_rx(
+        db,
+        period_from,
+        period_to,
+        receiver_id,
+        receiver_name,
+    )
+
+    contacts = rr.load_contacts(db)
+    resolver = rr.ContactResolver(contacts)
+
+    observer_name, observer_id = mr.determine_observer(
+        rows,
+        receiver_id,
+        receiver_name,
+    )
+    load, hour_values = mr.analyze_load(
+        rows,
+        period_from,
+        period_to,
+    )
+    routing = mr.analyze_routing(rows)
+    repeaters = mr.analyze_repeater_activity(
+        rows,
+        resolver,
+    )
+
+    geo_repeaters = mr.load_geo_repeaters(db)
+    extent, observed_geo = mr.analyze_extent(
+        repeaters,
+        geo_repeaters,
+    )
+
+    (
+        far_packets,
+        max_pos,
+        far_repeaters,
+        pos_counts,
+    ) = mr.analyze_unscoped_far(
+        rows,
+        resolver,
+    )
+
+    direct_neighbors = mr.analyze_direct_neighbors(
+        rows,
+        resolver,
+    )
+
+    filename = f"mesh_{date_from}_{date_to}.html"
+
+    report_html = mr.render_html(
+        observer_name,
+        observer_id,
+        period_from,
+        period_to,
+        load,
+        hour_values,
+        routing,
+        repeaters,
+        far_packets,
+        max_pos,
+        far_repeaters,
+        pos_counts,
+        direct_neighbors,
+        extent,
+        observed_geo,
+    )
+
+    return report_html, filename
+
+
+def default_report_dates() -> tuple[str, str]:
+    """Return a seven-day inclusive default range ending today."""
+    today = date.today()
+    start = today - timedelta(days=6)
+    return start.isoformat(), today.isoformat()
+
+
+def mesh_overview_dates() -> tuple[str, str]:
+    """Return a 28-day inclusive range ending today for the Mesh page map."""
+    today = date.today()
+    start = today - timedelta(days=27)
+    return start.isoformat(), today.isoformat()
+
+
+def build_mesh_overview(
+    config: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Build the 28-day interactive mesh map shown directly on /mesh."""
+    date_from, date_to = mesh_overview_dates()
+    period_from = normalize_date(date_from, end=False)
+    period_to = normalize_date(date_to, end=True)
+
+    db = rr.QuestDB(
+        config["questdb_host"],
+        config["questdb_port"],
+    )
+
+    receiver_id = config.get("receiver_id") or None
+    receiver_name = config.get("receiver_name") or None
+
+    rows = mr.load_mesh_rx(
+        db,
+        period_from,
+        period_to,
+        receiver_id,
+        receiver_name,
+    )
+
+    contacts = rr.load_contacts(db)
+    resolver = rr.ContactResolver(contacts)
+
+    observer_name, observer_id = mr.determine_observer(
+        rows,
+        receiver_id,
+        receiver_name,
+    )
+
+    repeaters = mr.analyze_repeater_activity(
+        rows,
+        resolver,
+    )
+    geo_repeaters = mr.load_geo_repeaters(db)
+    extent, observed_geo = mr.analyze_extent(
+        repeaters,
+        geo_repeaters,
+    )
+
+    map_html = mr.render_mesh_map(
+        observed_geo,
+        observer_id,
+        extent,
+    )
+
+    summary = {
+        "repeaters": len(repeaters),
+        "geo_repeaters": len(observed_geo),
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+
+    return map_html, summary
+
+
+def _preview_token(value: str) -> str:
+    value = value.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", value):
+        raise RuntimeError("Ungültige Report-Vorschau.")
+    return value
+
+
+def preview_paths(token: str) -> tuple[Path, Path]:
+    token = _preview_token(token)
+    return (
+        PREVIEW_DIR / f"{token}.html",
+        PREVIEW_DIR / f"{token}.json",
+    )
+
+
+def create_preview(
+    report_html: str,
+    filename: str,
+    report_type: str,
+    title: str,
+) -> str:
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    html_path, meta_path = preview_paths(token)
+
+    html_path.write_text(report_html, encoding="utf-8")
+    meta_path.write_text(
+        json.dumps(
+            {
+                "filename": filename,
+                "report_type": report_type,
+                "title": title,
+                "created": time.time(),
+            },
+            ensure_ascii=False,
+            indent=2,
         ),
         encoding="utf-8",
     )
+    return token
 
-    return destination, selected
+
+def load_preview(token: str) -> tuple[Path, dict[str, Any]]:
+    html_path, meta_path = preview_paths(token)
+    if not html_path.is_file() or not meta_path.is_file():
+        raise RuntimeError("Die Report-Vorschau ist nicht mehr verfügbar.")
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if not isinstance(meta, dict):
+        raise RuntimeError("Ungültige Vorschau-Metadaten.")
+    return html_path, meta
+
+
+def unique_destination(directory: Path, filename: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    original = Path(filename)
+    stem = original.stem
+    suffix = original.suffix
+
+    candidate = directory / original.name
+    counter = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}-{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
+def save_preview_html(
+    config: dict[str, Any],
+    token: str,
+) -> Path:
+    html_path, meta = load_preview(token)
+    filename = str(meta.get("filename") or f"report-{token}.html")
+    destination = unique_destination(output_dir(config), filename)
+    shutil.copyfile(html_path, destination)
+    return destination
+
+
+def find_pdf_browser() -> Path | None:
+    candidates: list[Path] = []
+
+    for executable in ("msedge", "chrome", "chromium"):
+        found = shutil.which(executable)
+        if found:
+            candidates.append(Path(found))
+
+    if sys.platform.startswith("win"):
+        env_candidates = [
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) /
+            "Microsoft/Edge/Application/msedge.exe",
+            Path(os.environ.get("PROGRAMFILES", "")) /
+            "Microsoft/Edge/Application/msedge.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) /
+            "Microsoft/Edge/Application/msedge.exe",
+            Path(os.environ.get("PROGRAMFILES", "")) /
+            "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) /
+            "Google/Chrome/Application/chrome.exe",
+        ]
+        candidates.extend(env_candidates)
+
+    for candidate in candidates:
+        if candidate and candidate.is_file():
+            return candidate
+    return None
+
+
+def save_preview_pdf(
+    config: dict[str, Any],
+    token: str,
+) -> Path:
+    _, meta = load_preview(token)
+    source_name = str(meta.get("filename") or f"report-{token}.html")
+    pdf_name = str(Path(source_name).with_suffix(".pdf"))
+    destination = unique_destination(output_dir(config), pdf_name)
+
+    browser = find_pdf_browser()
+    if browser is None:
+        raise RuntimeError(
+            "Für PDF wurde weder Microsoft Edge noch Google Chrome gefunden."
+        )
+
+    port = int(config.get("web_port", 8080))
+    preview_url = (
+        f"http://127.0.0.1:{port}/preview-files/{urllib.parse.quote(token)}.html"
+    )
+
+    command = [
+        str(browser),
+        "--headless=new",
+        "--disable-gpu",
+        "--no-pdf-header-footer",
+        "--run-all-compositor-stages-before-draw",
+        "--virtual-time-budget=5000",
+        f"--print-to-pdf={destination}",
+        preview_url,
+    ]
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=45,
+    )
+
+    if result.returncode != 0 or not destination.is_file():
+        detail = (result.stdout or "").strip()
+        raise RuntimeError(
+            "PDF-Erzeugung fehlgeschlagen."
+            + (f" Browser-Ausgabe: {detail}" if detail else "")
+        )
+
+    return destination
+
+
+def cleanup_previews(max_age_hours: int = 24) -> None:
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - max_age_hours * 3600
+
+    for path in PREVIEW_DIR.iterdir():
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def preview_page(
+    token: str,
+    message: str = "",
+    error: bool = False,
+) -> bytes:
+    _, meta = load_preview(token)
+    title = str(meta.get("title") or "Report-Vorschau")
+    filename = str(meta.get("filename") or "report.html")
+
+    message_html = ""
+    if message:
+        cls = "error" if error else "ok"
+        message_html = f'<div class="message {cls}">{esc(message)}</div>'
+
+    preview_url = f"/preview-files/{urllib.parse.quote(token)}.html"
+
+    body = f"""
+<div class="preview-shell">
+  <div class="preview-toolbar">
+    <div>
+      <h2>{esc(title)}</h2>
+      <div class="help">
+        Vorschau · noch nicht dauerhaft gespeichert · {esc(filename)}
+      </div>
+    </div>
+    <div class="preview-actions">
+      <form method="post" action="/save-preview">
+        <input type="hidden" name="token" value="{esc(token)}">
+        <button type="submit" name="format" value="pdf">
+          PDF speichern
+        </button>
+      </form>
+    </div>
+  </div>
+  {message_html}
+  <iframe
+    class="report-preview-frame"
+    src="{esc(preview_url)}"
+    title="{esc(title)}"
+  ></iframe>
+</div>
+"""
+    return page(title, body)
+
+
+def fmt_int(value: int | None) -> str:
+    if value is None:
+        return "–"
+    return f"{value:,}".replace(",", ".")
 
 
 def config_path(value: str) -> Path:
@@ -961,6 +1350,8 @@ def page(title: str, body: str, refresh_seconds: int = 0) -> bytes:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {f'<meta http-equiv="refresh" content="{refresh_seconds}">' if refresh_seconds > 0 else ''}
+<link rel="stylesheet" href="/map/leaflet/leaflet.css">
+<script src="/map/leaflet/leaflet.js"></script>
 <title>{esc(title)}</title>
 <style>
 :root {{
@@ -1019,7 +1410,7 @@ input, select {{
   width:100%;
   border:1px solid #aaa;
   border-radius:6px;
-  padding:10px 11px;
+  padding:12px 13px;
   font:inherit;
   background:white;
 }}
@@ -1061,7 +1452,7 @@ button:hover, .button:hover {{ opacity:.88; }}
   padding:16px;
   background:var(--soft);
 }}
-.status-title {{ font-weight:700; margin-bottom:8px; }}
+.status-title {{ font-weight:700; margin-bottom:10px; }}
 .status-value {{ font-size:1.15rem; font-weight:700; margin-bottom:5px; }}
 .status-value.ok {{ color:var(--ok); }}
 .status-value.error {{ color:var(--err); }}
@@ -1084,7 +1475,7 @@ button:hover, .button:hover {{ opacity:.88; }}
 }}
 .pipeline-banner {{
   display:flex;
-  gap:10px;
+  gap:12px;
   align-items:baseline;
   border:1px solid var(--line);
   border-radius:8px;
@@ -1096,7 +1487,7 @@ button:hover, .button:hover {{ opacity:.88; }}
 .pipeline-banner.error strong {{ color:var(--err); }}
 .dashboard-actions {{
   display:flex;
-  gap:8px;
+  gap:10px;
   flex-wrap:wrap;
   margin-top:16px;
 }}
@@ -1107,7 +1498,7 @@ button:hover, .button:hover {{ opacity:.88; }}
   display:flex;
   flex-wrap:wrap;
   gap:6px;
-  margin-top:14px;
+  margin-top:18px;
 }}
 .controls button {{
   padding:7px 9px;
@@ -1139,6 +1530,437 @@ button:hover, .button:hover {{ opacity:.88; }}
 .mono {{
   font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
 }}
+.mesh-overview {{
+  margin-top:26px;
+}}
+.mesh-overview-header {{
+  display:flex;
+  justify-content:space-between;
+  gap:18px;
+  align-items:flex-end;
+  margin-bottom:10px;
+}}
+.mesh-overview-header h2 {{
+  margin:0;
+}}
+.mesh-overview-summary {{
+  color:var(--muted);
+  font-size:.84rem;
+  text-align:right;
+}}
+.mesh-overview-facts {{
+  display:grid;
+  grid-template-columns:2fr 1fr 1fr;
+  gap:10px;
+  margin:12px 0 14px;
+}}
+.mesh-overview-fact {{
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:var(--soft);
+  padding:10px 12px;
+}}
+.fact-label {{
+  display:block;
+  color:var(--muted);
+  font-size:.76rem;
+  margin-bottom:3px;
+}}
+.map-search {{
+  margin-bottom:10px;
+  position:relative;
+}}
+.map-search label {{display:block;font-size:.84rem;font-weight:700;margin-bottom:5px}}
+.map-search-row {{display:flex;gap:8px;align-items:center}}
+.map-search-row input {{flex:1 1 auto;min-width:0}}
+.map-search-row button {{white-space:nowrap}}
+.map-search-row .map-search-reset {{background:#666}}
+.map-search-status {{min-height:1.2em;margin-top:5px;color:var(--muted);font-size:.8rem}}
+
+/* Autocomplete-Ergebnisse dürfen nicht die globale schwarze Button-Optik erben. */
+.map-search-suggestions {{
+  display:none;
+  position:absolute;
+  left:0;
+  right:112px;
+  z-index:1000;
+  margin-top:4px;
+  border:1px solid #c9c9c9;
+  border-radius:7px;
+  background:#fff;
+  overflow:hidden;
+  box-shadow:0 8px 20px rgba(0,0,0,.10);
+}}
+.map-search-suggestions.visible {{
+  display:block;
+}}
+.map-search-suggestion {{
+  width:100%;
+  display:block;
+  border:0;
+  border-bottom:1px solid #ececec;
+  border-radius:0;
+  padding:9px 11px;
+  background:#fff !important;
+  color:var(--fg) !important;
+  text-align:left;
+  font:inherit;
+  font-weight:400;
+  cursor:pointer;
+  box-shadow:none;
+}}
+.map-search-suggestion:last-child {{
+  border-bottom:0;
+}}
+.map-search-suggestion:hover,
+.map-search-suggestion.active {{
+  background:#f6f6f6 !important;
+  color:var(--fg) !important;
+  opacity:1;
+}}
+.map-search-suggestion.empty {{
+  cursor:default;
+  color:var(--muted) !important;
+}}
+.suggestion-main {{
+  display:block;
+}}
+.suggestion-name {{
+  display:block;
+  font-weight:700;
+  line-height:1.25;
+}}
+.suggestion-key {{
+  display:block;
+  margin-top:2px;
+  color:var(--muted);
+  font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+  font-size:.76rem;
+}}
+.offline-map-shell {{
+  border:1px solid var(--line);
+  border-radius:10px;
+  padding:12px;
+  background:#fff;
+}}
+.leaflet-map {{
+  width:100%;
+  height:520px;
+  border-radius:7px;
+  background:#ececec;
+}}
+.map-note {{
+  color:var(--muted);
+  font-size:.8rem;
+  margin-top:8px;
+}}
+.map-empty, .map-error {{
+  border:1px solid var(--line);
+  border-radius:9px;
+  padding:16px;
+  background:var(--soft);
+  color:var(--muted);
+  margin-top:14px;
+}}
+.map-error {{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  min-height:180px;
+  text-align:center;
+}}
+
+.neighbor-detail {{
+  margin-top:26px;
+}}
+.report-doc-header {{
+  padding-bottom:17px;
+  border-bottom:2px solid var(--fg);
+  margin-bottom:20px;
+}}
+.report-doc-brand {{
+  color:var(--muted);
+  font-size:.78rem;
+  text-transform:uppercase;
+  letter-spacing:.09em;
+  font-weight:700;
+}}
+.report-doc-type {{
+  margin:5px 0 3px;
+  font-size:1.75rem;
+  line-height:1.15;
+}}
+.report-doc-object {{
+  font-size:1.18rem;
+  font-weight:700;
+  margin-top:7px;
+}}
+.report-doc-key {{
+  color:var(--muted);
+  font-size:.8rem;
+  margin-top:4px;
+}}
+.report-doc-context {{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  margin-top:14px;
+}}
+.report-doc-card {{
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:var(--soft);
+  padding:10px 12px;
+}}
+.report-doc-label {{
+  color:var(--muted);
+  font-size:.76rem;
+  margin-bottom:3px;
+}}
+.report-doc-value {{
+  font-weight:700;
+}}
+.report-doc-sub {{
+  color:var(--muted);
+  font-size:.76rem;
+  margin-top:3px;
+}}
+.neighbor-heading {{
+  display:flex;
+  justify-content:space-between;
+  gap:20px;
+  align-items:flex-end;
+  margin-bottom:18px;
+}}
+.neighbor-heading h2 {{
+  margin:0;
+}}
+.neighbor-save-actions {{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+}}
+.neighbor-kpis {{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:12px;
+  margin-bottom:26px;
+}}
+.neighbor-kpi {{
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:var(--soft);
+  padding:14px;
+}}
+.neighbor-kpi span {{
+  display:block;
+  color:var(--muted);
+  font-size:.8rem;
+  margin-bottom:5px;
+}}
+.neighbor-kpi strong {{
+  display:block;
+  font-size:1.25rem;
+}}
+.neighbor-kpi small {{
+  display:block;
+  color:var(--muted);
+  margin-top:5px;
+}}
+.neighbor-section {{
+  margin-top:28px;
+}}
+.neighbor-section h2 {{
+  border-bottom:1px solid var(--line);
+  padding-bottom:7px;
+  margin-bottom:8px;
+}}
+.neighbor-chart {{
+  display:block;
+  width:100%;
+  height:auto;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:#fff;
+}}
+.neighbor-chart-grid {{
+  stroke:#e5e5e5;
+  stroke-width:1;
+}}
+.neighbor-chart-label {{
+  fill:#666;
+  font:12px Arial,Helvetica,sans-serif;
+}}
+.neighbor-signal-block {{
+  display:grid;
+  gap:14px;
+}}
+.signal-explanation {{
+  margin-top:8px;
+}}
+.signal-explanation h3 {{
+  margin:0 0 4px;
+  font-size:1rem;
+}}
+.signal-explanation p {{
+  margin:0;
+  color:var(--muted);
+  font-size:.86rem;
+}}
+.neighbor-chart-wrap {{
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:#fff;
+  overflow:hidden;
+}}
+.neighbor-chart-title {{
+  display:flex;
+  justify-content:space-between;
+  gap:16px;
+  align-items:center;
+  padding:10px 14px 0;
+}}
+.neighbor-chart-title span {{
+  color:var(--muted);
+  font-size:.8rem;
+}}
+.neighbor-chart-wrap .neighbor-chart {{
+  border:0;
+  border-radius:0;
+}}
+.neighbor-chart-grid {{
+  stroke:#e5e5e5;
+  stroke-width:1;
+}}
+.neighbor-chart-tick {{
+  stroke:#999;
+  stroke-width:1;
+}}
+.neighbor-chart-label {{
+  fill:#666;
+  font:11px Arial,Helvetica,sans-serif;
+}}
+.neighbor-chart-line {{
+  fill:none;
+  stroke-width:2.4;
+  stroke-linejoin:round;
+  stroke-linecap:round;
+}}
+.neighbor-chart-line.rssi {{
+  stroke:#2f6fb0;
+}}
+.neighbor-chart-line.snr {{
+  stroke:#c06a2b;
+}}
+.neighbor-map {{
+  width:100%;
+  height:430px;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:#ececec;
+}}
+.neighbor-advert-table {{
+  width:100%;
+  border-collapse:collapse;
+  table-layout:fixed;
+  margin-top:12px;
+  background:#fff;
+}}
+.neighbor-advert-table thead th {{
+  background:var(--soft);
+  border-bottom:1px solid var(--line);
+  padding:10px 12px;
+  font-size:.84rem;
+  font-weight:700;
+  text-align:left;
+}}
+.neighbor-advert-table tbody td {{
+  border-bottom:1px solid #e7e7e7;
+  padding:10px 12px;
+  vertical-align:middle;
+}}
+.neighbor-advert-table tbody tr:last-child td {{
+  border-bottom:0;
+}}
+.neighbor-advert-table .num {{
+  text-align:right;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}}
+.neighbor-advert-type {{
+  width:12%;
+}}
+.neighbor-advert-time {{
+  width:34%;
+}}
+.neighbor-advert-signal {{
+  width:15%;
+}}
+.neighbor-advert-region {{
+  width:24%;
+}}
+.advert-type {{
+  display:inline-block;
+  min-width:62px;
+  padding:4px 8px;
+  border-radius:999px;
+  font-size:.76rem;
+  font-weight:700;
+  text-align:center;
+  line-height:1.1;
+}}
+.advert-type.direct {{
+  background:#f0f0f0;
+  color:#444;
+}}
+.advert-type.flood {{
+  background:#e9eef5;
+  color:#2f4f6f;
+}}
+.flood-advert-row {{
+  background:#fafcff;
+}}
+.flood-advert-row td {{
+  font-weight:600;
+}}
+.neighbor-empty {{
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:var(--soft);
+  color:var(--muted);
+  padding:16px;
+}}
+
+.preview-shell {{
+  width:100%;
+  max-width:100%;
+  margin:0;
+}}
+.preview-toolbar {{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-end;
+  gap:18px;
+  margin-bottom:14px;
+}}
+.preview-toolbar h2 {{
+  margin:0;
+}}
+.preview-actions form {{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+}}
+.report-preview-frame {{
+  display:block;
+  width:100%;
+  height:calc(100vh - 220px);
+  min-height:680px;
+  border:1px solid var(--line);
+  border-radius:10px;
+  background:white;
+}}
 footer {{
   margin-top:32px;
   border-top:1px solid var(--line);
@@ -1152,9 +1974,30 @@ footer {{
   nav a {{ margin-left:0; margin-right:16px; }}
   .grid, .status-grid, .log-grid {{ grid-template-columns:1fr; }}
   .dashboard-heading {{ display:block; }}
-  .refresh-note {{ margin-top:10px; white-space:normal; }}
+  .refresh-note {{ margin-top:12px; white-space:normal; }}
   .pipeline-banner {{ display:block; }}
   .pipeline-banner span {{ display:block; margin-top:4px; }}
+  .preview-toolbar {{ display:block; }}
+  .preview-actions {{ margin-top:12px; }}
+  .report-preview-frame {{ min-height:560px; height:70vh; }}
+  .mesh-overview-header {{ display:block; }}
+  .mesh-overview-summary {{ text-align:left; margin-top:6px; }}
+  .mesh-overview-facts {{ grid-template-columns:1fr; }}
+  .neighbor-kpis {{ grid-template-columns:1fr; }}
+  .report-doc-context {{ grid-template-columns:1fr; }}
+  .neighbor-map {{ height:350px; }}
+  .neighbor-advert-table {{
+    table-layout:auto;
+    font-size:.9rem;
+  }}
+  .neighbor-advert-table thead th,
+  .neighbor-advert-table tbody td {{
+    padding:8px 7px;
+  }}
+  .map-search-row {{ flex-wrap:wrap; }}
+  .map-search-row input {{ flex-basis:100%; }}
+  .map-search-suggestions {{ right:0; }}
+  .leaflet-map {{ height:420px; }}
 }}
 </style>
 </head>
@@ -1166,7 +2009,9 @@ footer {{
   </div>
   <nav>
     <a href="/">Übersicht</a>
-    <a href="/report">Reports</a>
+    <a href="/mesh">Mesh</a>
+    <a href="/report">Repeater</a>
+    <a href="/neighbors">Nachbarn</a>
     <a href="/settings">Einstellungen</a>
   </nav>
 </header>
@@ -1175,6 +2020,1529 @@ footer {{
 </body>
 </html>"""
     return doc.encode("utf-8")
+
+
+
+def _resolve_direct_neighbor(
+    resolver: rr.ContactResolver,
+    path_id: str,
+) -> rr.Contact | None:
+    value = rr.norm(path_id)
+    if not value or len(value) % 2 != 0:
+        return None
+    if not all(ch in "0123456789abcdef" for ch in value):
+        return None
+
+    matches = resolver.resolve_path_id(
+        value,
+        len(value) // 2,
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def direct_neighbor_dataset(
+    config: dict[str, Any],
+    date_from: str,
+    date_to: str,
+) -> tuple[
+    list[dict[str, Any]],
+    list[rr.Contact],
+    dict[str, dict[str, Any]],
+]:
+    period_from = normalize_date(date_from, end=False)
+    period_to = normalize_date(date_to, end=True)
+
+    db = rr.QuestDB(
+        config["questdb_host"],
+        config["questdb_port"],
+    )
+    contacts = rr.load_contacts(db)
+    resolver = rr.ContactResolver(contacts)
+
+    rows = rr.load_rx(
+        db,
+        period_from,
+        period_to,
+        config.get("receiver_id") or None,
+        config.get("receiver_name") or None,
+    )
+
+    by_key: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        contact = _resolve_direct_neighbor(
+            resolver,
+            rr.text_value(row.get("repeater")),
+        )
+        if contact is None:
+            continue
+
+        entry = by_key.setdefault(
+            contact.public_key,
+            {
+                "contact": contact,
+                "rows": [],
+            },
+        )
+        entry["rows"].append(row)
+
+    direct_contacts = sorted(
+        (entry["contact"] for entry in by_key.values()),
+        key=lambda c: (
+            (c.adv_name or "").lower(),
+            c.public_key,
+        ),
+    )
+
+    return rows, direct_contacts, by_key
+
+
+def resolve_direct_neighbor_selection(
+    direct_contacts: list[rr.Contact],
+    query: str,
+) -> rr.Contact:
+    wanted = rr.norm(query)
+    if not wanted:
+        raise RuntimeError("Bitte einen direkten Nachbarn auswählen.")
+
+    exact_key = [
+        c for c in direct_contacts
+        if c.public_key == wanted
+    ]
+    if len(exact_key) == 1:
+        return exact_key[0]
+
+    exact_name = [
+        c for c in direct_contacts
+        if rr.norm(c.adv_name) == wanted
+    ]
+    if len(exact_name) == 1:
+        return exact_name[0]
+
+    prefix = [
+        c for c in direct_contacts
+        if c.public_key.startswith(wanted)
+    ]
+    if len(prefix) == 1:
+        return prefix[0]
+
+    if len(exact_name) > 1 or len(prefix) > 1:
+        raise RuntimeError(
+            "Die Nachbar-Auswahl ist nicht eindeutig."
+        )
+
+    raise RuntimeError(
+        "Dieser Repeater wurde im gewählten Zeitraum nicht als "
+        "direkter Nachbar des Receivers erkannt."
+    )
+
+
+def neighbor_hourly_signal(
+    rows: list[dict[str, Any]],
+) -> list[tuple[Any, float | None, float | None]]:
+    buckets: dict[Any, dict[str, list[float]]] = defaultdict(
+        lambda: {"rssi": [], "snr": []}
+    )
+
+    for row in rows:
+        dt = mr.parse_ts(row.get("ts"))
+        if dt is None:
+            continue
+
+        hour = dt.replace(minute=0, second=0, microsecond=0)
+
+        try:
+            buckets[hour]["rssi"].append(float(row.get("rssi_dbm")))
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            buckets[hour]["snr"].append(float(row.get("snr_db")))
+        except (TypeError, ValueError):
+            pass
+
+    return [
+        (
+            hour,
+            float(median(values["rssi"])) if values["rssi"] else None,
+            float(median(values["snr"])) if values["snr"] else None,
+        )
+        for hour, values in sorted(buckets.items())
+        if values["rssi"] or values["snr"]
+    ]
+
+
+def _neighbor_time_ticks(
+    values: list[tuple[Any, float | None, float | None]],
+    max_ticks: int = 7,
+) -> list[int]:
+    if not values:
+        return []
+    if len(values) <= max_ticks:
+        return list(range(len(values)))
+
+    last = len(values) - 1
+    raw = [
+        round(i * last / (max_ticks - 1))
+        for i in range(max_ticks)
+    ]
+
+    result = []
+    for idx in raw:
+        if idx not in result:
+            result.append(idx)
+    return result
+
+
+def _neighbor_single_signal_svg(
+    values: list[tuple[Any, float | None, float | None]],
+    metric: str,
+) -> str:
+    if metric not in {"rssi", "snr"}:
+        raise ValueError("Unbekannte Signal-Kennzahl.")
+
+    if metric == "rssi":
+        series = [
+            (dt, rssi)
+            for dt, rssi, _ in values
+            if rssi is not None
+        ]
+        unit = "dBm"
+        title = "RSSI"
+        css_class = "rssi"
+        step = 10.0
+        min_span = 20.0
+    else:
+        series = [
+            (dt, snr)
+            for dt, _, snr in values
+            if snr is not None
+        ]
+        unit = "dB"
+        title = "SNR"
+        css_class = "snr"
+        step = 5.0
+        min_span = 10.0
+
+    if not series:
+        return (
+            "<div class='neighbor-empty'>"
+            f"Keine {esc(title)}-Werte für diesen Zeitraum verfügbar."
+            "</div>"
+        )
+
+    width = 820
+    height = 270
+    pad_left = 58
+    pad_right = 20
+    pad_top = 26
+    pad_bottom = 54
+
+    numeric = [value for _, value in series]
+
+    low = math.floor(min(numeric) / step) * step
+    high = math.ceil(max(numeric) / step) * step
+    if high - low < min_span:
+        middle = (low + high) / 2
+        low = middle - min_span / 2
+        high = middle + min_span / 2
+
+    plot_w = width - pad_left - pad_right
+    plot_h = height - pad_top - pad_bottom
+
+    def px(index: int) -> float:
+        if len(series) <= 1:
+            return pad_left + plot_w / 2
+        return pad_left + index / (len(series) - 1) * plot_w
+
+    def py(value: float) -> float:
+        ratio = (high - value) / (high - low)
+        return pad_top + ratio * plot_h
+
+    points = " ".join(
+        f"{px(i):.1f},{py(value):.1f}"
+        for i, (_, value) in enumerate(series)
+    )
+
+    grid_lines = []
+    y_labels = []
+    for i in range(6):
+        y = pad_top + (i / 5) * plot_h
+        level = high - (i / 5) * (high - low)
+
+        grid_lines.append(
+            f"<line x1='{pad_left}' y1='{y:.1f}' "
+            f"x2='{width-pad_right}' y2='{y:.1f}' "
+            "class='neighbor-chart-grid'/>"
+        )
+
+        label = (
+            f"{level:.0f}"
+            if metric == "rssi"
+            else f"{level:.1f}".replace(".", ",")
+        )
+        y_labels.append(
+            f"<text x='{pad_left-9}' y='{y+4:.1f}' "
+            "text-anchor='end' class='neighbor-chart-label'>"
+            f"{label}</text>"
+        )
+
+    tick_indexes = _neighbor_time_ticks(series, 7)
+    x_ticks = []
+
+    same_day = (
+        series[0][0].date() == series[-1][0].date()
+        if len(series) > 1 else True
+    )
+
+    for idx in tick_indexes:
+        dt = series[idx][0]
+        x = px(idx)
+        label = (
+            dt.strftime("%H:%M")
+            if same_day
+            else dt.strftime("%d.%m. %H:%M")
+        )
+
+        anchor = "middle"
+        if idx == 0:
+            anchor = "start"
+        elif idx == len(series) - 1:
+            anchor = "end"
+
+        x_ticks.append(
+            f"<line x1='{x:.1f}' y1='{pad_top+plot_h}' "
+            f"x2='{x:.1f}' y2='{pad_top+plot_h+5}' "
+            "class='neighbor-chart-tick'/>"
+            f"<text x='{x:.1f}' y='{height-16}' "
+            f"text-anchor='{anchor}' class='neighbor-chart-label'>"
+            f"{esc(label)}</text>"
+        )
+
+    return f"""
+    <div class="neighbor-chart-wrap">
+      <div class="neighbor-chart-title">
+        <strong>{esc(title)}</strong>
+        <span>{esc(unit)}</span>
+      </div>
+      <svg class="neighbor-chart"
+           viewBox="0 0 {width} {height}"
+           role="img"
+           aria-label="Median {esc(title)} pro Stunde">
+        {''.join(grid_lines)}
+        {''.join(y_labels)}
+        <polyline points="{points}"
+                  class="neighbor-chart-line {css_class}"/>
+        {''.join(x_ticks)}
+      </svg>
+    </div>
+    """
+
+
+def neighbor_signal_charts(
+    values: list[tuple[Any, float | None, float | None]],
+) -> str:
+    if not values:
+        return (
+            "<div class='neighbor-empty'>"
+            "Keine RSSI- oder SNR-Werte für diesen Zeitraum verfügbar."
+            "</div>"
+        )
+
+    return f"""
+    <div class="neighbor-signal-block">
+      <div class="signal-explanation">
+        <h3>SNR – Signalqualität gegenüber Rauschen</h3>
+        <p>
+          SNR beschreibt, wie weit das empfangene Signal dieses Nachbarn
+          gegenüber dem lokalen Rausch- und Störpegel am Beobachtungsstandort
+          hervortritt. Höhere Werte bedeuten günstigere Empfangsbedingungen;
+          LoRa kann auch Pakete mit negativem SNR noch dekodieren.
+        </p>
+      </div>
+      {_neighbor_single_signal_svg(values, "snr")}
+
+      <div class="signal-explanation">
+        <h3>RSSI – empfangene Paketleistung</h3>
+        <p>
+          RSSI beschreibt die am Receiver gemessene Leistung des empfangenen
+          Pakets in dBm. Weniger negative Werte stehen für ein stärker
+          empfangenes Signal.
+        </p>
+      </div>
+      {_neighbor_single_signal_svg(values, "rssi")}
+    </div>
+    """
+
+
+def _geo_by_key(
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Load the latest known coordinates for all contacts from mc_contacts.
+
+    Important: unlike mesh_report.load_geo_repeaters(), this intentionally
+    does NOT filter node_role == repeater. The PacketTap receiver can also
+    have a contact entry with adv_lat/adv_lon and is required for the
+    direct-neighbor distance calculation.
+    """
+    db = rr.QuestDB(
+        config["questdb_host"],
+        config["questdb_port"],
+    )
+
+    available = db.table_columns("mc_contacts")
+    required = {"ts", "public_key", "adv_lat", "adv_lon"}
+    missing = required - available
+    if missing:
+        raise RuntimeError(
+            "mc_contacts fehlen Spalten: " + ", ".join(sorted(missing))
+        )
+
+    rows = db.rows("""
+        SELECT
+            ts,
+            public_key,
+            adv_name,
+            node_role,
+            adv_lat,
+            adv_lon
+        FROM mc_contacts
+        WHERE public_key IS NOT NULL
+        ORDER BY ts
+    """)
+
+    latest: dict[str, Any] = {}
+
+    for row in rows:
+        key = rr.norm(row.get("public_key"))
+        if not rr.is_full_public_key(key):
+            continue
+
+        try:
+            lat = float(row.get("adv_lat"))
+            lon = float(row.get("adv_lon"))
+        except (TypeError, ValueError):
+            continue
+
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            continue
+        if abs(lat) < 1e-9 and abs(lon) < 1e-9:
+            continue
+
+        latest[key] = mr.GeoRepeater(
+            public_key=key,
+            name=rr.text_value(row.get("adv_name")) or "–",
+            lat=lat,
+            lon=lon,
+        )
+
+    return latest
+
+
+def distance_and_bearing(
+    first: Any,
+    second: Any,
+) -> tuple[float, float]:
+    distance = mr.haversine_km(
+        first.lat,
+        first.lon,
+        second.lat,
+        second.lon,
+    )
+
+    lat1 = math.radians(first.lat)
+    lat2 = math.radians(second.lat)
+    dlon = math.radians(second.lon - first.lon)
+
+    x = math.sin(dlon) * math.cos(lat2)
+    y = (
+        math.cos(lat1) * math.sin(lat2)
+        - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    )
+    bearing = (
+        math.degrees(math.atan2(x, y)) + 360.0
+    ) % 360.0
+
+    return distance, bearing
+
+
+def compass_direction(bearing: float) -> str:
+    names = [
+        "N", "NNO", "NO", "ONO",
+        "O", "OSO", "SO", "SSO",
+        "S", "SSW", "SW", "WSW",
+        "W", "WNW", "NW", "NNW",
+    ]
+    index = int((bearing + 11.25) // 22.5) % 16
+    return names[index]
+
+
+def neighbor_map_html(
+    receiver_geo: Any | None,
+    neighbor_geo: Any | None,
+    receiver_name: str,
+    neighbor_name: str,
+) -> str:
+    if receiver_geo is None or neighbor_geo is None:
+        return (
+            "<div class='neighbor-empty'>"
+            "Für Receiver und Nachbar sind nicht beide Koordinaten verfügbar."
+            "</div>"
+        )
+
+    payload = json.dumps(
+        {
+            "receiver": {
+                "name": receiver_name,
+                "lat": receiver_geo.lat,
+                "lon": receiver_geo.lon,
+            },
+            "neighbor": {
+                "name": neighbor_name,
+                "lat": neighbor_geo.lat,
+                "lon": neighbor_geo.lon,
+            },
+        },
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
+
+    return f"""
+    <div id="neighbor-map" class="neighbor-map"></div>
+    <script>
+    (function() {{
+      const data = {payload};
+      if (typeof L === "undefined") {{
+        document.getElementById("neighbor-map").innerHTML =
+          "<div class='map-error'>Leaflet wurde nicht geladen.</div>";
+        return;
+      }}
+
+      const map = L.map("neighbor-map", {{
+        attributionControl: true,
+        zoomControl: true,
+        fadeAnimation: false,
+        zoomAnimation: false
+      }});
+
+      L.tileLayer(
+        "https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",
+        {{
+          maxZoom: 19,
+          attribution: "&copy; OpenStreetMap contributors"
+        }}
+      ).addTo(map);
+
+      const a = [data.receiver.lat, data.receiver.lon];
+      const b = [data.neighbor.lat, data.neighbor.lon];
+
+      L.circleMarker(a, {{
+        radius: 7,
+        weight: 3,
+        color: "#111",
+        fillColor: "#fff",
+        fillOpacity: 1
+      }}).addTo(map).bindTooltip(
+        "<strong>" + data.receiver.name + "</strong><br>Receiver"
+      );
+
+      L.circleMarker(b, {{
+        radius: 7,
+        weight: 2,
+        color: "#555",
+        fillColor: "#555",
+        fillOpacity: .85
+      }}).addTo(map).bindTooltip(
+        "<strong>" + data.neighbor.name + "</strong><br>Direkter Nachbar"
+      );
+
+      L.polyline([a, b], {{
+        weight: 2,
+        opacity: .8
+      }}).addTo(map);
+
+      map.fitBounds([a, b], {{
+        padding: [35, 35],
+        maxZoom: 12
+      }});
+    }})();
+    </script>
+    """
+
+
+def neighbor_advert_summary(
+    config: dict[str, Any],
+    public_key: str,
+    date_from: str,
+    date_to: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """
+    Return the last 3 own Direct-Adverts and the last own Flood-Advert.
+
+    Advert ownership is linked via public_key + packet_payload_sha256.
+    The route type is taken from mc_rx:
+      RT 2 + hop 0 -> Direct-Advert
+      RT 0         -> Flood-Advert
+
+    For Flood-Adverts the region is taken from the matching mc_rx packet,
+    because Direct-Adverts normally do not carry a routing region.
+    """
+    db = rr.QuestDB(
+        config["questdb_host"],
+        config["questdb_port"],
+    )
+
+    period_from = normalize_date(date_from, end=False)
+    period_to = normalize_date(date_to, end=True)
+    receiver_id = config.get("receiver_id") or None
+    receiver_name = config.get("receiver_name") or None
+
+    observations = rr.load_contact_observations(
+        db,
+        period_from,
+        period_to,
+        receiver_id,
+        receiver_name,
+    )
+
+    rx = rr.load_rx(
+        db,
+        period_from,
+        period_to,
+        receiver_id,
+        receiver_name,
+    )
+
+    selected_key = rr.norm(public_key)
+
+    obs_by_hash: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in observations:
+        if (
+            rr.norm(row.get("public_key")) == selected_key
+            and rr.norm(row.get("source_type")) == "advert"
+        ):
+            payload_hash = rr.norm(row.get("packet_payload_sha256"))
+            if payload_hash:
+                obs_by_hash[payload_hash].append(row)
+
+    rx_by_hash: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rx:
+        payload_hash = rr.norm(row.get("packet_payload_sha256"))
+        if (
+            payload_hash in obs_by_hash
+            and rr.norm(row.get("payload_type")) == "advert"
+        ):
+            rx_by_hash[payload_hash].append(row)
+
+    direct_events: list[dict[str, Any]] = []
+    flood_events: list[dict[str, Any]] = []
+
+    for payload_hash, packet_rows in rx_by_hash.items():
+        matching_obs = obs_by_hash[payload_hash]
+
+        direct_rows = [
+            row for row in packet_rows
+            if rr.route_type(row) == rr.RT_DIRECT
+            and rr.to_int(row.get("hop_count")) == 0
+        ]
+
+        flood_rows = [
+            row for row in packet_rows
+            if rr.route_type(row) == rr.RT_TRANSPORT_FLOOD
+        ]
+
+        if direct_rows:
+            packet = min(
+                direct_rows,
+                key=lambda row: rr.text_value(row.get("ts")),
+            )
+            obs = min(
+                matching_obs,
+                key=lambda row: abs(
+                    (
+                        (mr.parse_ts(row.get("ts")) or mr.parse_ts(packet.get("ts")))
+                        - (mr.parse_ts(packet.get("ts")) or mr.parse_ts(row.get("ts")))
+                    ).total_seconds()
+                ),
+            )
+            direct_events.append(
+                {
+                    "type": "Direct",
+                    "ts": packet.get("ts") or obs.get("ts"),
+                    "rssi_dbm": obs.get("rssi_dbm"),
+                    "snr_db": obs.get("snr_db"),
+                    "region": None,
+                    "packet_payload_sha256": payload_hash,
+                }
+            )
+
+        if flood_rows:
+            # One Flood-Advert can be received multiple times over different
+            # paths. Count it as one event and use the earliest reception.
+            packet = min(
+                flood_rows,
+                key=lambda row: rr.text_value(row.get("ts")),
+            )
+            obs = min(
+                matching_obs,
+                key=lambda row: abs(
+                    (
+                        (mr.parse_ts(row.get("ts")) or mr.parse_ts(packet.get("ts")))
+                        - (mr.parse_ts(packet.get("ts")) or mr.parse_ts(row.get("ts")))
+                    ).total_seconds()
+                ),
+            )
+
+            region = (
+                rr.text_value(packet.get("region"))
+                or rr.text_value(obs.get("region"))
+                or "–"
+            )
+
+            flood_events.append(
+                {
+                    "type": "Flood",
+                    "ts": packet.get("ts") or obs.get("ts"),
+                    "rssi_dbm": obs.get("rssi_dbm"),
+                    "snr_db": obs.get("snr_db"),
+                    "region": region,
+                    "packet_payload_sha256": payload_hash,
+                }
+            )
+
+    direct_events.sort(
+        key=lambda row: rr.text_value(row.get("ts")),
+        reverse=True,
+    )
+    flood_events.sort(
+        key=lambda row: rr.text_value(row.get("ts")),
+        reverse=True,
+    )
+
+    return direct_events[:3], (flood_events[0] if flood_events else None)
+
+
+
+def fmt_rssi(value: Any) -> str:
+    try:
+        return f"{float(value):.0f} dBm"
+    except (TypeError, ValueError):
+        return "–"
+
+
+def fmt_snr(value: Any) -> str:
+    try:
+        return f"{float(value):+.1f} dB".replace(".", ",")
+    except (TypeError, ValueError):
+        return "–"
+
+def fmt_neighbor_time(value: Any) -> str:
+    dt = mr.parse_ts(value)
+    if dt is None:
+        return rr.text_value(value) or "–"
+    return dt.astimezone().strftime("%d.%m.%Y · %H:%M:%S")
+
+
+def neighbor_page(
+    config: dict[str, Any],
+    selected_query: str = "",
+    date_from: str | None = None,
+    date_to: str | None = None,
+    message: str = "",
+    error: bool = False,
+    export_mode: bool = False,
+) -> bytes:
+    if not date_from or not date_to:
+        default_from, default_to = default_report_dates()
+        date_from = date_from or default_from
+        date_to = date_to or default_to
+
+    msg_html = ""
+    if message:
+        cls = "error" if error else "ok"
+        msg_html = f'<div class="message {cls}">{esc(message)}</div>'
+
+    try:
+        all_rows, direct_contacts, by_key = direct_neighbor_dataset(
+            config,
+            date_from,
+            date_to,
+        )
+        options = "\n".join(
+            f'<option value="{esc(c.adv_name or c.public_key)}">'
+            f'{esc(c.public_key[:8])}…'
+            "</option>"
+            for c in direct_contacts
+        )
+        neighbor_note = (
+            f"{len(direct_contacts)} direkte Nachbarn im gewählten "
+            "Zeitraum eindeutig erkannt."
+        )
+    except Exception as exc:
+        direct_contacts = []
+        by_key = {}
+        all_rows = []
+        options = ""
+        neighbor_note = f"Nachbarliste konnte nicht geladen werden: {exc}"
+
+    details_html = ""
+
+    if selected_query:
+        try:
+            selected = resolve_direct_neighbor_selection(
+                direct_contacts,
+                selected_query,
+            )
+            selected_rows = by_key[selected.public_key]["rows"]
+
+            # Rank by packet count among direct neighbors.
+            ranking = sorted(
+                (
+                    (
+                        key,
+                        len(entry["rows"]),
+                    )
+                    for key, entry in by_key.items()
+                ),
+                key=lambda item: (
+                    -item[1],
+                    item[0],
+                ),
+            )
+            rank_by_key = {
+                key: idx
+                for idx, (key, _) in enumerate(ranking, start=1)
+            }
+
+            rssi_values = []
+            snr_values = []
+            for row in selected_rows:
+                try:
+                    rssi_values.append(float(row.get("rssi_dbm")))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    snr_values.append(float(row.get("snr_db")))
+                except (TypeError, ValueError):
+                    pass
+
+            median_rssi = (
+                float(median(rssi_values))
+                if rssi_values
+                else None
+            )
+            median_snr = (
+                float(median(snr_values))
+                if snr_values
+                else None
+            )
+
+            signal_values = neighbor_hourly_signal(selected_rows)
+            chart_html = neighbor_signal_charts(signal_values)
+
+            last_ts = max(
+                (
+                    mr.parse_ts(row.get("ts"))
+                    for row in selected_rows
+                    if mr.parse_ts(row.get("ts")) is not None
+                ),
+                default=None,
+            )
+
+            geo = _geo_by_key(config)
+
+            # Use the same receiver identity resolution as the Mesh report.
+            # If receiver_id is not explicitly configured, determine it from
+            # mc_rx. This is how the observation site (e.g. Stutensee - Spoeck)
+            # is identified for the Mesh map as well.
+            observer_name, observer_id = mr.determine_observer(
+                all_rows,
+                config.get("receiver_id") or None,
+                config.get("receiver_name") or None,
+            )
+
+            receiver_geo = geo.get(rr.norm(observer_id))
+            neighbor_geo = geo.get(selected.public_key)
+
+            distance_text = "–"
+            direction_text = "–"
+            if receiver_geo is not None and neighbor_geo is not None:
+                distance, bearing = distance_and_bearing(
+                    receiver_geo,
+                    neighbor_geo,
+                )
+                distance_text = f"{distance:.1f} km".replace(".", ",")
+                direction_text = (
+                    f"{bearing:.0f}° · {compass_direction(bearing)}"
+                )
+
+            map_html = neighbor_map_html(
+                receiver_geo,
+                neighbor_geo,
+                observer_name or "Receiver",
+                selected.adv_name or selected.public_key[:8],
+            )
+
+            direct_adverts, flood_advert = neighbor_advert_summary(
+                config,
+                selected.public_key,
+                date_from,
+                date_to,
+            )
+
+            advert_rows_parts = []
+
+            for row in direct_adverts:
+                advert_rows_parts.append(
+                    "<tr>"
+                    "<td><span class='advert-type direct'>Direct</span></td>"
+                    f"<td>{esc(fmt_neighbor_time(row.get('ts')).replace(' · ', ' '))}</td>"
+                    f"<td class='num'>{esc(fmt_rssi(row.get('rssi_dbm')))}</td>"
+                    f"<td class='num'>{esc(fmt_snr(row.get('snr_db')))}</td>"
+                    "<td class='muted'>–</td>"
+                    "</tr>"
+                )
+
+            if flood_advert is not None:
+                advert_rows_parts.append(
+                    "<tr class='flood-advert-row'>"
+                    "<td><span class='advert-type flood'>Flood</span></td>"
+                    f"<td>{esc(fmt_neighbor_time(flood_advert.get('ts')).replace(' · ', ' '))}</td>"
+                    f"<td class='num'>{esc(fmt_rssi(flood_advert.get('rssi_dbm')))}</td>"
+                    f"<td class='num'>{esc(fmt_snr(flood_advert.get('snr_db')))}</td>"
+                    f"<td><strong>{esc(flood_advert.get('region') or '–')}</strong></td>"
+                    "</tr>"
+                )
+
+            advert_rows = "".join(advert_rows_parts)
+
+            if not advert_rows:
+                advert_rows = (
+                    "<tr><td colspan='5' class='muted'>"
+                    "Keine eigenen Direct- oder Flood-Adverts im Zeitraum erkannt."
+                    "</td></tr>"
+                )
+
+            details_html = f"""
+<section class="neighbor-detail">
+  <div class="report-doc-header">
+    <div class="report-doc-brand">MESHCORE PACKETTAP</div>
+    <h2 class="report-doc-type">Nachbar-Report</h2>
+    <div class="report-doc-object">{esc(selected.adv_name or "(ohne Namen)")}</div>
+    <div class="report-doc-key mono">Public Key: {esc(selected.public_key)}</div>
+    <div class="report-doc-context">
+      <div class="report-doc-card">
+        <div class="report-doc-label">Beobachtungsstandort</div>
+        <div class="report-doc-value">{esc(observer_name)}</div>
+        <div class="report-doc-sub mono">
+          Public Key: {esc(mr.short_receiver_key(observer_id))}
+        </div>
+      </div>
+      <div class="report-doc-card">
+        <div class="report-doc-label">Beobachtungszeitraum</div>
+        <div class="report-doc-value">
+          {esc(mr.format_period_de(normalize_date(date_from)))} – {esc(mr.format_period_de(normalize_date(date_to, end=True)))}
+        </div>
+      </div>
+    </div>
+    {"" if export_mode else f"""
+    <form class="neighbor-save-actions" method="post" action="/save-neighbor">
+      <input type="hidden" name="neighbor" value="{esc(selected.public_key)}">
+      <input type="hidden" name="date_from" value="{esc(date_from)}">
+      <input type="hidden" name="date_to" value="{esc(date_to)}">
+      <button type="submit" name="format" value="pdf">PDF speichern</button>
+    </form>
+    """}
+  </div>
+
+  <div class="neighbor-kpis">
+    <div class="neighbor-kpi">
+      <span>Pakete</span>
+      <strong>{fmt_int(len(selected_rows))}</strong>
+      <small>{esc(date_from)} – {esc(date_to)}</small>
+    </div>
+    <div class="neighbor-kpi">
+      <span>Rang unter direkten Nachbarn</span>
+      <strong>#{esc(rank_by_key.get(selected.public_key, "–"))}</strong>
+      <small>von {fmt_int(len(ranking))}</small>
+    </div>
+    <div class="neighbor-kpi">
+      <span>Median RSSI</span>
+      <strong>{(f"{median_rssi:.1f} dBm".replace(".", ",")) if median_rssi is not None else "–"}</strong>
+      <small>alle direkt empfangenen Pakete</small>
+    </div>
+    <div class="neighbor-kpi">
+      <span>Median SNR</span>
+      <strong>{(f"{median_snr:.1f} dB".replace(".", ",")) if median_snr is not None else "–"}</strong>
+      <small>alle direkt empfangenen Pakete</small>
+    </div>
+    <div class="neighbor-kpi">
+      <span>Entfernung</span>
+      <strong>{esc(distance_text)}</strong>
+      <small>{esc(direction_text)}</small>
+    </div>
+    <div class="neighbor-kpi">
+      <span>Zuletzt direkt gehört</span>
+      <strong>{esc(fmt_neighbor_time(last_ts) if last_ts else "–")}</strong>
+      <small>letztes Paket im Zeitraum</small>
+    </div>
+  </div>
+
+  <div class="neighbor-section neighbor-position-section">
+    <h2>Position und Entfernung</h2>
+    <p class="help">
+      Luftlinie zwischen PacketTap-Receiver und direktem Nachbarn anhand der
+      zuletzt bekannten Advert-Koordinaten.
+    </p>
+    {map_html}
+  </div>
+
+  <div class="neighbor-section">
+    <h2>Signalstärke im Zeitverlauf</h2>
+    <p class="help">
+      Für beide Kennzahlen wird der Median pro Stunde aus den unmittelbar
+      empfangenen Paketen dieses Nachbarn dargestellt. SNR und RSSI erhalten
+      jeweils ein eigenes Diagramm und eine eigene Skala.
+    </p>
+    {chart_html}
+  </div>
+
+  <div class="neighbor-section">
+    <h2>Letzte Adverts des Nachbarn</h2>
+    <p class="help">
+      Angezeigt werden die letzten drei eigenen Direct-Adverts sowie das
+      zuletzt erkannte eigene Flood-Advert. Direct-Adverts besitzen
+      normalerweise keine Routing-Region; beim Flood-Advert wird die Region
+      aus dem zugehörigen RT-0-Paket übernommen.
+    </p>
+    <table class="neighbor-advert-table">
+      <colgroup>
+        <col class="neighbor-advert-type">
+        <col class="neighbor-advert-time">
+        <col class="neighbor-advert-signal">
+        <col class="neighbor-advert-signal">
+        <col class="neighbor-advert-region">
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Typ</th>
+          <th>Zeitpunkt</th>
+          <th class="num">RSSI</th>
+          <th class="num">SNR</th>
+          <th>Region</th>
+        </tr>
+      </thead>
+      <tbody>{advert_rows}</tbody>
+    </table>
+  </div>
+</section>
+"""
+        except Exception as exc:
+            msg_html += (
+                f'<div class="message error">{esc(exc)}</div>'
+            )
+
+    selection_html = ""
+    if not export_mode:
+        selection_html = f"""
+<div class="card">
+  <h2>Direkten Nachbarn auswählen</h2>
+  <p class="help">
+    Es werden nur Repeater angeboten, die im gewählten Zeitraum als letzter
+    Repeater unmittelbar vor dem PacketTap-Receiver eindeutig erkannt wurden.
+  </p>
+
+  <form method="get" action="/neighbors">
+    <div class="field">
+      <label for="neighbor">Nachbar</label>
+      <input
+        id="neighbor"
+        name="neighbor"
+        list="direct-neighbors"
+        value="{esc(selected_query)}"
+        required
+        placeholder="Name oder Public Key"
+        autocomplete="off"
+      >
+      <datalist id="direct-neighbors">
+        {options}
+      </datalist>
+      <div class="help">{esc(neighbor_note)}</div>
+    </div>
+
+    <div class="grid">
+      <div class="field">
+        <label for="date_from">Von</label>
+        <input id="date_from" name="date_from" type="date"
+               value="{esc(date_from)}" required>
+      </div>
+      <div class="field">
+        <label for="date_to">Bis</label>
+        <input id="date_to" name="date_to" type="date"
+               value="{esc(date_to)}" required>
+      </div>
+    </div>
+
+    <button type="submit">Nachbar anzeigen</button>
+  </form>
+</div>
+"""
+
+    body = f"""
+{msg_html}
+{selection_html}
+{details_html}
+"""
+    return page("Nachbarn", body)
+
+
+def neighbor_export_page(
+    config: dict[str, Any],
+    selected: rr.Contact,
+    date_from: str,
+    date_to: str,
+    details_html: str,
+    observer_name: str,
+    observer_id: str,
+) -> bytes:
+    """Render a clean standalone HTML/PDF neighbor report."""
+    created = date.today().strftime("%d.%m.%Y")
+    title = (
+        f"Nachbar-Report – {selected.adv_name or selected.public_key[:8]}"
+    )
+
+    # The interactive page detail starts with its own neighbor heading.
+    # In the export this information belongs in the dedicated report header.
+    export_details = details_html
+    start = export_details.find('<div class="report-doc-header">')
+    if start >= 0:
+        end = export_details.find("</div>\n\n  <div class=\"neighbor-kpis\">", start)
+        if end >= 0:
+            export_details = (
+                export_details[:start]
+                + '<div class="neighbor-kpis">'
+                + export_details[end + len("</div>\n\n  <div class=\"neighbor-kpis\">"):]
+            )
+
+    report_header = f"""
+<header class="neighbor-report-header">
+  <div class="neighbor-report-kicker">MESHCORE PACKETTAP</div>
+  <h1>Nachbar-Report</h1>
+  <div class="neighbor-report-object">{esc(selected.adv_name or "(ohne Namen)")}</div>
+  <div class="neighbor-report-object-key mono">
+    Public Key: {esc(selected.public_key)}
+  </div>
+  <div class="neighbor-report-meta">
+    <div>
+      <span>Beobachtungsstandort</span>
+      <strong>{esc(observer_name or "–")}</strong>
+      <small class="mono">Public Key: {esc(mr.short_receiver_key(observer_id))}</small>
+    </div>
+    <div>
+      <span>Beobachtungszeitraum</span>
+      <strong>{esc(mr.format_period_de(normalize_date(date_from)))} – {esc(mr.format_period_de(normalize_date(date_to, end=True)))}</strong>
+    </div>
+  </div>
+</header>
+"""
+
+    footer = f"""
+<footer class="neighbor-report-footer">
+  MeshCore PacketTap · Nachbar-Report · erstellt am {esc(created)}
+</footer>
+"""
+
+    css = r"""
+:root {
+  --fg:#1f1f1f;
+  --muted:#6a6a6a;
+  --line:#d8d8d8;
+  --soft:#f5f5f5;
+}
+* { box-sizing:border-box; }
+body {
+  margin:0;
+  background:#fff;
+  color:var(--fg);
+  font-family:Arial,Helvetica,sans-serif;
+  line-height:1.4;
+}
+.report-page {
+  max-width:1100px;
+  margin:0 auto;
+  padding:34px 38px 26px;
+}
+.neighbor-report-header {
+  border-bottom:2px solid #333;
+  padding-bottom:18px;
+  margin-bottom:22px;
+}
+.neighbor-report-kicker {
+  color:var(--muted);
+  font-size:.82rem;
+  font-weight:700;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+.neighbor-report-header h1 {
+  margin:4px 0 3px;
+  font-size:1.7rem;
+}
+.neighbor-report-object {
+  font-size:1.12rem;
+  font-weight:700;
+  margin-top:7px;
+}
+.neighbor-report-object-key {
+  color:var(--muted);
+  font-size:.8rem;
+  margin-top:3px;
+  margin-bottom:16px;
+}
+.neighbor-report-meta {
+  display:grid;
+  grid-template-columns:2fr 1fr;
+  gap:14px;
+}
+.neighbor-report-meta > div {
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:var(--soft);
+  padding:10px 12px;
+}
+.neighbor-report-meta span,
+.neighbor-kpi span {
+  display:block;
+  color:var(--muted);
+  font-size:.78rem;
+  margin-bottom:4px;
+}
+.neighbor-report-meta strong { display:block; }
+.neighbor-report-meta small {
+  display:block;
+  margin-top:3px;
+  color:var(--muted);
+  overflow-wrap:anywhere;
+}
+.mono { font-family:Consolas,monospace; }
+.help,.muted { color:var(--muted); }
+.neighbor-kpis {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:12px;
+  margin-bottom:26px;
+}
+.neighbor-kpi {
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:var(--soft);
+  padding:14px;
+}
+.neighbor-kpi strong {
+  display:block;
+  font-size:1.22rem;
+}
+.neighbor-kpi small {
+  display:block;
+  color:var(--muted);
+  margin-top:5px;
+}
+.neighbor-section {
+  margin-top:28px;
+  break-inside:avoid;
+}
+.neighbor-section h2 {
+  border-bottom:1px solid var(--line);
+  padding-bottom:7px;
+  margin-bottom:8px;
+}
+.neighbor-signal-block { display:grid; gap:14px; }
+.signal-explanation { margin-top:8px; }
+.signal-explanation h3 { margin:0 0 4px; font-size:1rem; }
+.signal-explanation p {
+  margin:0;
+  color:var(--muted);
+  font-size:.86rem;
+}
+.neighbor-chart-wrap {
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:#fff;
+  overflow:hidden;
+  break-inside:avoid;
+}
+.neighbor-chart-title {
+  display:flex;
+  justify-content:space-between;
+  padding:10px 14px 0;
+}
+.neighbor-chart-title span { color:var(--muted); font-size:.8rem; }
+.neighbor-chart { display:block; width:100%; height:auto; }
+.neighbor-chart-grid { stroke:#e5e5e5; stroke-width:1; }
+.neighbor-chart-tick { stroke:#999; stroke-width:1; }
+.neighbor-chart-label { fill:#666; font:11px Arial,Helvetica,sans-serif; }
+.neighbor-chart-line {
+  fill:none;
+  stroke-width:2.4;
+  stroke-linejoin:round;
+  stroke-linecap:round;
+}
+.neighbor-chart-line.rssi { stroke:#2f6fb0; }
+.neighbor-chart-line.snr { stroke:#c06a2b; }
+.neighbor-map {
+  width:100%;
+  height:430px;
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:#ececec;
+}
+.neighbor-map .leaflet-tile-pane,
+.neighbor-map .leaflet-tile {
+  opacity:1 !important;
+  filter:none !important;
+}
+.neighbor-empty {
+  border:1px solid var(--line);
+  border-radius:9px;
+  background:var(--soft);
+  color:var(--muted);
+  padding:16px;
+}
+table.neighbor-advert-table {
+  width:100%;
+  border-collapse:collapse;
+  table-layout:fixed;
+  margin-top:12px;
+}
+.neighbor-advert-table th {
+  background:var(--soft);
+  border-bottom:1px solid var(--line);
+  padding:10px 12px;
+  text-align:left;
+  font-size:.84rem;
+}
+.neighbor-advert-table td {
+  border-bottom:1px solid #e7e7e7;
+  padding:10px 12px;
+}
+.neighbor-advert-table .num {
+  text-align:right;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+.neighbor-advert-type { width:12%; }
+.neighbor-advert-time { width:34%; }
+.neighbor-advert-signal { width:15%; }
+.neighbor-advert-region { width:24%; }
+.advert-type {
+  display:inline-block;
+  min-width:62px;
+  padding:4px 8px;
+  border-radius:999px;
+  font-size:.76rem;
+  font-weight:700;
+  text-align:center;
+}
+.advert-type.direct { background:#f0f0f0; color:#444; }
+.advert-type.flood { background:#e9eef5; color:#2f4f6f; }
+.flood-advert-row { background:#fafcff; }
+.neighbor-report-footer {
+  border-top:1px solid var(--line);
+  margin-top:32px;
+  padding-top:10px;
+  color:var(--muted);
+  font-size:.76rem;
+}
+@page {
+  margin:10mm;
+}
+@media print {
+  body { margin:0; padding:0; }
+  .report-page { max-width:none; margin:0; padding:0; }
+
+  /* Erste Seite kompakter halten. */
+  .neighbor-report-header {
+    break-after:avoid-page;
+    padding-bottom:16px;
+    margin-bottom:14px;
+  }
+  .neighbor-report-header h1 {
+    margin-bottom:2px;
+  }
+  .neighbor-report-meta {
+    margin-top:10px;
+    gap:10px;
+  }
+  .neighbor-report-meta > div {
+    padding:10px 12px;
+  }
+  .neighbor-kpis {
+    break-inside:avoid-page;
+    gap:8px;
+    margin-bottom:14px;
+  }
+  .neighbor-kpi {
+    padding:10px 11px;
+  }
+  .neighbor-kpi strong {
+    font-size:1.12rem;
+  }
+  .neighbor-kpi small {
+    margin-top:3px;
+  }
+
+  /* Alle weiteren Kapitel beginnen bewusst auf einer neuen Seite. */
+  .neighbor-section {
+    break-before:page;
+    break-inside:auto;
+  }
+
+  /* Position bleibt auf Seite 1 und wird als kompletter Block behandelt. */
+  .neighbor-position-section {
+    break-before:auto;
+    break-inside:avoid-page;
+    margin-top:14px;
+  }
+  .neighbor-position-section h2 {
+    margin-top:0;
+  }
+  .neighbor-position-section .help {
+    margin-bottom:8px;
+  }
+  .neighbor-position-section .neighbor-map {
+    height:330px;
+    break-inside:avoid-page;
+  }
+
+  .neighbor-section h2 { break-after:avoid-page; }
+  .neighbor-section > .help { break-after:avoid-page; }
+  .neighbor-chart-wrap { break-inside:avoid-page; }
+  .neighbor-map { break-inside:avoid-page; }
+  .neighbor-advert-table { break-inside:avoid-page; }
+  .neighbor-advert-table thead { display:table-header-group; }
+  .neighbor-advert-table tr { break-inside:avoid-page; }
+}
+"""
+
+    html = f"""<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{esc(title)}</title>
+<link rel="stylesheet" href="/map/leaflet/leaflet.css">
+<script src="/map/leaflet/leaflet.js"></script>
+<style>{css}</style>
+</head>
+<body>
+  <main class="report-page">
+    {report_header}
+    {export_details}
+    {footer}
+  </main>
+</body>
+</html>"""
+    return html.encode("utf-8")
+
+
+
+def save_neighbor_analysis(
+    config: dict[str, Any],
+    neighbor_query: str,
+    date_from: str,
+    date_to: str,
+    output_format: str,
+) -> Path:
+    """Persist the current neighbor analysis as HTML or PDF."""
+    if not neighbor_query:
+        raise RuntimeError("Kein Nachbar ausgewählt.")
+    if not date_from or not date_to:
+        raise RuntimeError("Beobachtungszeitraum fehlt.")
+    if date_to < date_from:
+        raise RuntimeError(
+            "Das Bis-Datum darf nicht vor dem Von-Datum liegen."
+        )
+
+    # Resolve once so the filename is stable and readable.
+    _, direct_contacts, _ = direct_neighbor_dataset(
+        config,
+        date_from,
+        date_to,
+    )
+    selected = resolve_direct_neighbor_selection(
+        direct_contacts,
+        neighbor_query,
+    )
+
+    clean_name = safe_filename(
+        selected.adv_name or selected.public_key[:8]
+    )
+    filename = (
+        f"neighbor_{clean_name}_{date_from}_{date_to}.html"
+    )
+
+    # Build the detail once using the existing analysis implementation.
+    rendered = neighbor_page(
+        config,
+        selected_query=selected.public_key,
+        date_from=date_from,
+        date_to=date_to,
+        export_mode=True,
+    ).decode("utf-8")
+
+    detail_start = rendered.find('<section class="neighbor-detail">')
+    detail_end = rendered.find("</section>", detail_start)
+    if detail_start < 0 or detail_end < 0:
+        raise RuntimeError(
+            "Nachbar-Report konnte nicht für den Export aufbereitet werden."
+        )
+    detail_end += len("</section>")
+    details_html = rendered[detail_start:detail_end]
+
+    # Determine exactly the same observation-site identity used by the
+    # neighbor analysis and Mesh map.
+    all_rows, _, _ = direct_neighbor_dataset(
+        config,
+        date_from,
+        date_to,
+    )
+    observer_name, observer_id = mr.determine_observer(
+        all_rows,
+        config.get("receiver_id") or None,
+        config.get("receiver_name") or None,
+    )
+
+    html_text = neighbor_export_page(
+        config,
+        selected,
+        date_from,
+        date_to,
+        details_html,
+        observer_name,
+        observer_id,
+    ).decode("utf-8")
+
+    token = create_preview(
+        html_text,
+        filename,
+        "neighbor",
+        f"Nachbar – {selected.adv_name or selected.public_key[:8]}",
+    )
+
+    try:
+        if output_format == "pdf":
+            return save_preview_pdf(config, token)
+        raise RuntimeError("Es wird nur PDF als Speicherformat unterstützt.")
+    finally:
+        try:
+            html_path, meta_path = preview_paths(token)
+            if html_path.exists():
+                html_path.unlink()
+            if meta_path.exists():
+                meta_path.unlink()
+        except OSError:
+            pass
+
 
 
 def form_page(
@@ -1210,10 +3578,12 @@ def form_page(
         cls = "error" if error else "ok"
         msg_html = f'<div class="message {cls}">{esc(message)}</div>'
 
+    default_from, default_to = default_report_dates()
+
     body = f"""
 {msg_html}
 <div class="card">
-  <h2>Report erzeugen</h2>
+  <h2>Repeater Report erzeugen</h2>
   <p class="help">
     Repeater über exakten Namen oder 2-Byte-Hash auswählen. Die
     QuestDB- und Receiver-Einstellungen werden aus report_config.json gelesen.
@@ -1239,11 +3609,11 @@ def form_page(
     <div class="grid">
       <div class="field">
         <label for="date_from">Von</label>
-        <input id="date_from" name="date_from" type="date" required>
+        <input id="date_from" name="date_from" type="date" value="{esc(default_from)}" required>
       </div>
       <div class="field">
         <label for="date_to">Bis</label>
-        <input id="date_to" name="date_to" type="date" required>
+        <input id="date_to" name="date_to" type="date" value="{esc(default_to)}" required>
       </div>
     </div>
 
@@ -1252,6 +3622,94 @@ def form_page(
 </div>
 """
     return page("Repeater Report", body)
+
+
+def mesh_form_page(
+    config: dict[str, Any],
+    message: str = "",
+    error: bool = False,
+) -> bytes:
+    msg_html = ""
+    if message:
+        cls = "error" if error else "ok"
+        msg_html = f'<div class="message {cls}">{esc(message)}</div>'
+
+    default_from, default_to = default_report_dates()
+
+    try:
+        mesh_map_html, mesh_map_summary = build_mesh_overview(config)
+    except Exception as exc:
+        mesh_map_html = (
+            "<div class='map-error'>"
+            "Mesh-Karte konnte nicht geladen werden: "
+            f"{esc(exc)}"
+            "</div>"
+        )
+        map_from, map_to = mesh_overview_dates()
+        mesh_map_summary = {
+            "repeaters": "–",
+            "geo_repeaters": "–",
+            "date_from": map_from,
+            "date_to": map_to,
+        }
+
+    body = f"""
+{msg_html}
+<div class="card">
+  <h2>Mesh Report erzeugen</h2>
+  <p class="help">
+    Erstellt einen standortbezogenen Report über das vom konfigurierten
+    PacketTap-Receiver beobachtete Mesh. Repeater-Auswahl ist nicht notwendig.
+  </p>
+
+  <div class="message">
+    <strong>Beobachtungsstandort:</strong>
+    {esc(config.get('receiver_name') or 'nicht konfiguriert')}
+  </div>
+
+  <form method="post" action="/generate-mesh">
+    <div class="grid">
+      <div class="field">
+        <label for="date_from">Von</label>
+        <input id="date_from" name="date_from" type="date" value="{esc(default_from)}" required>
+      </div>
+      <div class="field">
+        <label for="date_to">Bis</label>
+        <input id="date_to" name="date_to" type="date" value="{esc(default_to)}" required>
+      </div>
+    </div>
+
+    <button type="submit">Mesh Report erzeugen</button>
+  </form>
+</div>
+
+<section class="mesh-overview">
+  <div class="mesh-overview-header">
+    <div>
+      <h2>Karte des beobachteten Mesh</h2>
+      <div class="help">
+        Langzeitübersicht der letzten 28 Tage, unabhängig vom Report-Zeitraum.
+      </div>
+    </div>
+  </div>
+  <div class="mesh-overview-facts">
+    <div class="mesh-overview-fact">
+      <span class="fact-label">Zeitraum</span>
+      <strong>{esc(mesh_map_summary['date_from'])} – {esc(mesh_map_summary['date_to'])}</strong>
+    </div>
+    <div class="mesh-overview-fact">
+      <span class="fact-label">Beobachtete Repeater</span>
+      <strong>{esc(mesh_map_summary['repeaters'])}</strong>
+    </div>
+    <div class="mesh-overview-fact">
+      <span class="fact-label">Mit bekannten Koordinaten</span>
+      <strong>{esc(mesh_map_summary['geo_repeaters'])}</strong>
+    </div>
+  </div>
+  {mesh_map_html}
+</section>
+"""
+    return page("Mesh Report", body)
 
 
 def settings_page(
@@ -1478,6 +3936,57 @@ def dashboard_redirect_url(message: str = "", error: bool = False) -> str:
     return "/" + (f"?{query}" if query else "")
 
 
+def reports_asset_path(url_path: str) -> Path | None:
+    """Resolve /reports/... safely below BASE_DIR/reports."""
+    if not url_path.startswith("/reports/"):
+        return None
+
+    relative = urllib.parse.unquote(url_path[len("/reports/"):])
+    candidate = (REPORTS_DIR / relative).resolve()
+    root = REPORTS_DIR.resolve()
+
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+
+    return candidate
+
+
+def map_asset_path(url_path: str) -> Path | None:
+    """Resolve /map/... safely below BASE_DIR/map."""
+    if not url_path.startswith("/map/"):
+        return None
+
+    relative = urllib.parse.unquote(url_path[len("/map/"):])
+    candidate = (MAP_DIR / relative).resolve()
+    root = MAP_DIR.resolve()
+
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+
+    return candidate
+
+
+def map_content_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    explicit = {
+        ".js": "application/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+    }
+    if suffix in explicit:
+        return explicit[suffix]
+    guessed, _ = mimetypes.guess_type(str(path))
+    return guessed or "application/octet-stream"
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "MeshCoreReportUI/" + APP_VERSION
 
@@ -1520,6 +4029,21 @@ class Handler(BaseHTTPRequestHandler):
         try:
             config = load_config()
 
+            if path.startswith("/map/"):
+                asset = map_asset_path(path)
+                if asset is None or not asset.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+
+                data = asset.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", map_content_type(asset))
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
             if path == "/":
                 query = urllib.parse.parse_qs(
                     parsed.query,
@@ -1540,27 +4064,86 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_html(form_page(config))
                 return
 
+            if path == "/mesh":
+                self.send_html(mesh_form_page(config))
+                return
+
+            if path == "/neighbors":
+                query = urllib.parse.parse_qs(
+                    parsed.query,
+                    keep_blank_values=True,
+                )
+                neighbor = query.get("neighbor", [""])[-1]
+                date_from = query.get("date_from", [""])[-1] or None
+                date_to = query.get("date_to", [""])[-1] or None
+                message = query.get("message", [""])[-1]
+                error = query.get("error", ["0"])[-1] == "1"
+                self.send_html(
+                    neighbor_page(
+                        config,
+                        selected_query=neighbor,
+                        date_from=date_from,
+                        date_to=date_to,
+                        message=message,
+                        error=error,
+                    )
+                )
+                return
+
             if path == "/settings":
                 self.send_html(settings_page(config))
                 return
 
-            if path.startswith("/reports/"):
-                filename = urllib.parse.unquote(path[len("/reports/"):])
-                report_root = output_dir(config)
-                candidate = (report_root / filename).resolve()
+            if path.startswith("/preview/"):
+                token = path[len("/preview/"):]
+                query = urllib.parse.parse_qs(
+                    parsed.query,
+                    keep_blank_values=True,
+                )
+                message = query.get("message", [""])[-1]
+                error = query.get("error", ["0"])[-1] == "1"
+                self.send_html(
+                    preview_page(
+                        token,
+                        message=message,
+                        error=error,
+                    )
+                )
+                return
 
-                if (
-                    candidate.parent != report_root
-                    or not candidate.is_file()
-                    or candidate.suffix.lower() != ".html"
-                ):
+            if path.startswith("/preview-files/"):
+                filename = path[len("/preview-files/"):]
+                match = re.fullmatch(r"([0-9a-f]{32})\.html", filename)
+                if not match:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+
+                html_path, _ = preview_paths(match.group(1))
+                if not html_path.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+
+                data = html_path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            if path.startswith("/reports/"):
+                candidate = reports_asset_path(path)
+
+                if candidate is None or not candidate.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
 
                 data = candidate.read_bytes()
                 self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Type", map_content_type(candidate))
                 self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(data)
                 return
@@ -1646,6 +4229,31 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if path == "/generate-mesh":
+                date_from = data.get("date_from", "")
+                date_to = data.get("date_to", "")
+
+                if date_to < date_from:
+                    raise RuntimeError(
+                        "Das Bis-Datum darf nicht vor dem Von-Datum liegen."
+                    )
+
+                report_html, filename = generate_mesh_report(
+                    config,
+                    date_from,
+                    date_to,
+                )
+
+                token = create_preview(
+                    report_html,
+                    filename,
+                    "mesh",
+                    "Mesh Report",
+                )
+                self.redirect(f"/preview/{token}")
+                return
+
+
             if path == "/settings":
                 updated = {
                     "questdb_host": data.get("questdb_host", "").strip(),
@@ -1725,37 +4333,65 @@ class Handler(BaseHTTPRequestHandler):
                         "Das Bis-Datum darf nicht vor dem Von-Datum liegen."
                     )
 
-                destination, selected = generate_report(
+                report_html, filename, selected = generate_report(
                     config,
                     repeater_query,
                     date_from,
                     date_to,
                 )
 
-                report_url = (
-                    "/reports/"
-                    + urllib.parse.quote(destination.name)
+                token = create_preview(
+                    report_html,
+                    filename,
+                    "repeater",
+                    (
+                        "Repeater Report – "
+                        + (selected.adv_name or selected.public_key[:8])
+                    ),
+                )
+                self.redirect(f"/preview/{token}")
+                return
+
+            if path == "/save-neighbor":
+                neighbor_query = data.get("neighbor", "")
+                date_from = data.get("date_from", "")
+                date_to = data.get("date_to", "")
+                output_format = data.get("format", "").lower()
+
+                destination = save_neighbor_analysis(
+                    config,
+                    neighbor_query,
+                    date_from,
+                    date_to,
+                    output_format,
                 )
 
-                body = f"""
-<div class="message ok">
-  Report für <strong>{esc(selected.adv_name or selected.public_key)}</strong>
-  wurde erstellt.
-</div>
-<div class="card">
-  <div class="field">
-    <label>Datei</label>
-    <div class="mono">{esc(destination.name)}</div>
-  </div>
-  <a class="button" href="{esc(report_url)}" target="_blank">
-    Report öffnen
-  </a>
-  <a class="button" href="/report" style="margin-left:8px">
-    Weiteren Report erzeugen
-  </a>
-</div>
-"""
-                self.send_html(page("Report erstellt", body))
+                message = f"Gespeichert: {destination.name}"
+                query_string = urllib.parse.urlencode(
+                    {
+                        "neighbor": neighbor_query,
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "message": message,
+                    }
+                )
+                self.redirect(f"/neighbors?{query_string}")
+                return
+
+            if path == "/save-preview":
+                token = data.get("token", "")
+                output_format = data.get("format", "").lower()
+
+                if output_format == "pdf":
+                    destination = save_preview_pdf(config, token)
+                else:
+                    raise RuntimeError("Es wird nur PDF als Speicherformat unterstützt.")
+
+                message = f"Gespeichert: {destination.name}"
+                self.redirect(
+                    f"/preview/{urllib.parse.quote(token)}?"
+                    + urllib.parse.urlencode({"message": message})
+                )
                 return
 
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -1771,6 +4407,47 @@ class Handler(BaseHTTPRequestHandler):
                     settings_page(config, str(exc), error=True),
                     HTTPStatus.BAD_REQUEST,
                 )
+            elif path == "/generate-mesh":
+                self.send_html(
+                    mesh_form_page(config, str(exc), error=True),
+                    HTTPStatus.BAD_REQUEST,
+                )
+            elif path == "/save-neighbor":
+                neighbor_query = data.get("neighbor", "")
+                date_from = data.get("date_from", "")
+                date_to = data.get("date_to", "")
+                query_string = urllib.parse.urlencode(
+                    {
+                        "neighbor": neighbor_query,
+                        "date_from": date_from,
+                        "date_to": date_to,
+                        "message": str(exc),
+                        "error": "1",
+                    }
+                )
+                self.redirect(f"/neighbors?{query_string}")
+            elif path == "/save-preview":
+                token = ""
+                try:
+                    token = data.get("token", "")
+                    _preview_token(token)
+                    self.redirect(
+                        f"/preview/{urllib.parse.quote(token)}?"
+                        + urllib.parse.urlencode(
+                            {
+                                "message": str(exc),
+                                "error": "1",
+                            }
+                        )
+                    )
+                except Exception:
+                    self.send_html(
+                        page(
+                            "Fehler",
+                            f'<div class="message error">{esc(exc)}</div>',
+                        ),
+                        HTTPStatus.BAD_REQUEST,
+                    )
             elif path == "/service":
                 self.redirect(
                     dashboard_redirect_url(
@@ -1795,6 +4472,11 @@ def main() -> int:
     host = config["web_host"]
     port = config["web_port"]
 
+    MAP_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    cleanup_previews()
+
     auto_start_services(config)
 
     server = ThreadingHTTPServer((host, port), Handler)
@@ -1808,6 +4490,10 @@ def main() -> int:
     )
     print(
         f"[WEB] Konfiguration: {CONFIG_FILE}"
+    )
+    print(
+        "[WEB] Reports: http://"
+        f"{'127.0.0.1' if host == '0.0.0.0' else host}:{port}/reports/"
     )
     print("[WEB] Beenden mit Strg+C")
     print("[WEB] Receiver und Importer laufen dabei weiter.")

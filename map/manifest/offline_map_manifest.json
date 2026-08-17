@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "tool": "prepare_offline_map.py v0.1",
+  "questdb_host": "192.168.1.2",
+  "questdb_port": 9000,
+  "period_from": "2026-08-14T00:00:00Z",
+  "period_to": "2026-08-16T23:59:59Z",
+  "receiver_id": null,
+  "receiver_name": "Stutensee - Spoeck",
+  "margin_km": 50.0,
+  "zoom": {
+    "min": 6,
+    "max": 12
+  },
+  "observed_repeaters": 313,
+  "observed_repeaters_with_coordinates": 311,
+  "bbox_observed": {
+    "south": 45.329436,
+    "west": 4.564045,
+    "north": 50.545102,
+    "east": 10.27473
+  },
+  "bbox_with_margin": {
+    "south": 44.88028041250449,
+    "west": 3.8936073359862484,
+    "north": 50.99425758749551,
+    "east": 10.945167664013752
+  },
+  "tile_ranges": [
+    {
+      "zoom": 6,
+      "x_min": 32,
+      "x_max": 33,
+      "y_min": 21,
+      "y_max": 23,
+      "tile_count": 6
+    },
+    {
+      "zoom": 7,
+      "x_min": 65,
+      "x_max": 67,
+      "y_min": 42,
+      "y_max": 46,
+      "tile_count": 15
+    },
+    {
+      "zoom": 8,
+      "x_min": 130,
+      "x_max": 135,
+      "y_min": 85,
+      "y_max": 92,
+      "tile_count": 48
+    },
+    {
+      "zoom": 9,
+      "x_min": 261,
+      "x_max": 271,
+      "y_min": 171,
+      "y_max": 184,
+      "tile_count": 154
+    },
+    {
+      "zoom": 10,
+      "x_min": 523,
+      "x_max": 543,
+      "y_min": 342,
+      "y_max": 368,
+      "tile_count": 567
+    },
+    {
+      "zoom": 11,
+      "x_min": 1046,
+      "x_max": 1086,
+      "y_min": 685,
+      "y_max": 737,
+      "tile_count": 2173
+    },
+    {
+      "zoom": 12,
+      "x_min": 2092,
+      "x_max": 2172,
+      "y_min": 1371,
+      "y_max": 1475,
+      "tile_count": 8505
+    }
+  ],
+  "total_tiles": 11468,
+  "tile_path_template": "map/tiles/{z}/{x}/{y}.png"
+}

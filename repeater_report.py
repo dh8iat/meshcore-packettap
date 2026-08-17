@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap - Repeater Report v0.31
+MeshCore PacketTap - Repeater Report v0.49
 =========================================
 
 Direkt auf das dokumentierte QuestDB-Datenmodell von meshcore-packettap
@@ -1515,9 +1515,6 @@ def render_html(
     )
 
     receiver_cards = [
-        ("Beobachtungsstandort", metrics.observer_location),
-        ("Beobachtungszeitraum", period_text),
-        ("Receiver Public Key", metrics.receiver_id),
         ("Gesamtpakete", fmt_int(metrics.total_packets)),
         ("Direkt gehörte Repeater", fmt_int(metrics.directly_heard_repeaters)),
         ("Repeater im beobachteten Mesh", fmt_int(metrics.repeater_rank_total)),
@@ -1568,17 +1565,21 @@ def render_html(
         ),
     ]
 
-    repeater_kpi_html = "".join(
-        f"""
-        <div class="kpi">
-          <div class="kpi-value">{esc(main_value)}</div>
-          <div class="kpi-subvalue">{esc(sub_value)}</div>
-          <div class="kpi-label">{esc(label)}</div>
-          {assessment_html(*assessment)}
-        </div>
-        """
-        for label, main_value, sub_value, assessment in repeater_kpis
-    )
+    def render_repeater_kpis(items: list[tuple[str, str, str, tuple[str, str]]]) -> str:
+        return "".join(
+            f"""
+            <div class="kpi">
+              <div class="kpi-value">{esc(main_value)}</div>
+              <div class="kpi-subvalue">{esc(sub_value)}</div>
+              <div class="kpi-label">{esc(label)}</div>
+              {assessment_html(*assessment)}
+            </div>
+            """
+            for label, main_value, sub_value, assessment in items
+        )
+
+    repeater_kpi_primary_html = render_repeater_kpis(repeater_kpis[:2])
+    repeater_kpi_path_html = render_repeater_kpis(repeater_kpis[2:])
 
     routing_cards = [
         (
@@ -1610,7 +1611,6 @@ def render_html(
           <div class="routing-label">{esc(label)}</div>
           <div class="routing-value">{esc(value)}</div>
           <div class="routing-subvalue">{esc(subvalue)}</div>
-          <div class="routing-type">{esc(route_type_text)}</div>
           <div class="routing-detail">{esc(detail)}</div>
         </div>
         """
@@ -1663,38 +1663,67 @@ def render_html(
         neighbor_rows = []
         for n in neighbors:
             note = ""
+            display_name = esc(n.name)
+            display_key = esc(short_key(n.public_key))
+
             if n.ambiguous:
                 note = (
                     f"<div class='warn'>Path-ID {esc(n.path_id)} ist "
                     f"{n.candidates}-fach mehrdeutig.</div>"
                 )
+
+                # Mögliche Repeater nicht inline, sondern jeweils in eigener Zeile.
+                candidate_names = [
+                    part.strip()
+                    for part in n.name.split(" / ")
+                    if part.strip()
+                ]
+                display_name = (
+                    "<div class='neighbor-candidates'>"
+                    + "".join(
+                        f"<div>{esc(name)}</div>"
+                        for name in candidate_names
+                    )
+                    + "</div>"
+                    if candidate_names
+                    else "<span class='muted'>mehrdeutig</span>"
+                )
+
+                # Bei einer Hash-Kollision keinen Kandidaten-Public-Key zeigen.
+                # Stattdessen die tatsächlich beobachtete Path-ID ausgeben.
+                display_key = esc(n.path_id)
+
             elif n.candidates == 0:
                 note = (
                     f"<div class='muted small'>Path-ID {esc(n.path_id)} "
                     "konnte keinem bekannten Repeater eindeutig zugeordnet "
                     "werden.</div>"
                 )
+                display_key = esc(n.path_id)
 
             neighbor_rows.append(
                 "<tr>"
-                f"<td><strong>{esc(n.name)}</strong>{note}</td>"
+                f"<td class='mono path-id'>{esc(n.path_id)}</td>"
+                f"<td class='neighbor-name'>{display_name}{note}</td>"
+                f"<td class='mono key'>{display_key}</td>"
                 f"<td class='num'>{fmt_int(n.packets)}</td>"
-                f"<td class='mono key'>{esc(short_key(n.public_key))}</td>"
                 "</tr>"
             )
 
         neighbors_html = f"""
-        <table class="neighbors-table">
+        <table class="neighbors-table repeater-neighbors-table gt3-table">
           <colgroup>
-            <col class="neighbor-col-name">
-            <col class="neighbor-col-count">
-            <col class="neighbor-col-key">
+            <col class="gt3-col-path">
+            <col class="gt3-col-name">
+            <col class="gt3-col-key">
+            <col class="gt3-col-count">
           </colgroup>
           <thead>
             <tr>
+              <th>Path-ID</th>
               <th>Repeater</th>
-              <th class="num">Pakete</th>
               <th>Public Key</th>
+              <th class="num">Pakete</th>
             </tr>
           </thead>
           <tbody>{''.join(neighbor_rows)}</tbody>
@@ -1705,44 +1734,180 @@ def render_html(
             "<p class='status muted'>Keine Repeater-Nachbarn ermittelt.</p>"
         )
 
-    if neighbors_gt3:
+    # Bei kurzen Path-Hashes kann eine Path-ID zu mehreren bekannten
+    # Repeatern passen. Solche Hash-Kollisionen dürfen nicht als fest
+    # identifizierter Nachbar dargestellt oder einem einzelnen Repeater
+    # zugerechnet werden.
+    gt3_unique = [
+        n for n in neighbors_gt3
+        if not n.ambiguous and n.candidates == 1
+    ]
+    gt3_ambiguous = [
+        n for n in neighbors_gt3
+        if n.ambiguous and n.candidates > 1
+    ]
+    gt3_unknown = [
+        n for n in neighbors_gt3
+        if not n.ambiguous and n.candidates == 0
+    ]
+
+    gt3_parts = [
+        """
+        <p class="section-intro">
+          Diese eindeutig aufgelösten Nachbarn wurden bei unscoped
+          Flood-Paketen mit mehr als drei Hops am untersuchten Repeater
+          beobachtet. Mehrdeutige Path-IDs werden hier bewusst nicht als
+          Repeater gezählt.
+        </p>
+        """
+    ]
+
+    if gt3_unique:
         gt3_rows = []
-        for n in neighbors_gt3:
+        for n in gt3_unique:
             gt3_rows.append(
                 "<tr>"
-                f"<td><strong>{esc(n.name)}</strong></td>"
-                f"<td class='num'>{fmt_int(n.unscoped_gt3_packets)}</td>"
+                f"<td class='mono path-id'>{esc(n.path_id)}</td>"
+                f"<td class='neighbor-name'>{esc(n.name)}</td>"
                 f"<td class='mono key'>{esc(short_key(n.public_key))}</td>"
+                f"<td class='num'>{fmt_int(n.unscoped_gt3_packets)}</td>"
                 "</tr>"
             )
-        gt3_html = f"""
-        <p class="section-intro">
-          Diese Nachbarn wurden bei unscoped Flood-Paketen mit mehr als
-          drei Hops am untersuchten Repeater beobachtet.
-        </p>
-        <table class="neighbors-table">
-          <colgroup>
-            <col class="neighbor-col-name">
-            <col class="neighbor-col-count">
-            <col class="neighbor-col-key">
-          </colgroup>
-          <thead>
-            <tr>
-              <th>Repeater</th>
-              <th class="num">Pakete</th>
-              <th>Public Key</th>
-            </tr>
-          </thead>
-          <tbody>{''.join(gt3_rows)}</tbody>
-        </table>
-        """
+
+        gt3_parts.append(
+            f"""
+            <h3>Eindeutig aufgelöste Repeater</h3>
+            <table class="neighbors-table gt3-table compact-neighbor-table">
+              <colgroup>
+                <col class="gt3-col-path">
+                <col class="gt3-col-name">
+                <col class="gt3-col-key">
+                <col class="gt3-col-count">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Path-ID</th>
+                  <th>Repeater</th>
+                  <th>Public Key</th>
+                  <th class="num">Pakete</th>
+                </tr>
+              </thead>
+              <tbody>{''.join(gt3_rows)}</tbody>
+            </table>
+            """
+        )
     else:
-        gt3_html = """
-        <div class="status-ok">
-          Keine Repeater-Nachbarn bei Unscoped-Paketen mit mehr als 3 Hops
-          beobachtet.
-        </div>
-        """
+        gt3_parts.append(
+            """
+            <div class="status-ok">
+              Keine eindeutig identifizierten Repeater-Nachbarn bei
+              Unscoped-Paketen mit mehr als 3 Hops beobachtet.
+            </div>
+            """
+        )
+
+    if gt3_ambiguous:
+        ambiguous_rows = []
+        for n in gt3_ambiguous:
+            matches = [
+                part.strip()
+                for part in n.name.split(" / ")
+                if part.strip()
+            ]
+            candidate_html = (
+                "<div class='neighbor-candidates'>"
+                + "".join(
+                    f"<div>{esc(name)}</div>"
+                    for name in matches
+                )
+                + "</div>"
+                if matches
+                else "<span class='muted'>(keine Namen verfügbar)</span>"
+            )
+            ambiguous_rows.append(
+                "<tr>"
+                f"<td class='mono path-id'>{esc(n.path_id)}</td>"
+                f"<td>{candidate_html}</td>"
+                f"<td class='num'>{fmt_int(n.candidates)}</td>"
+                f"<td class='num'>{fmt_int(n.unscoped_gt3_packets)}</td>"
+                "</tr>"
+            )
+
+        gt3_parts.append(
+            f"""
+            <div class="ambiguous-subsection">
+              <h3>Nicht eindeutig auflösbare Path-IDs</h3>
+              <p class="section-intro">
+                Aufgrund der verwendeten Path-Hash-Größe können diese
+                Pfadpositionen keinem einzelnen bekannten Repeater eindeutig
+                zugeordnet werden. Die Paketanzahl beschreibt das Auftreten
+                der mehrdeutigen Path-ID und wird keinem der möglichen
+                Repeater zugerechnet.
+              </p>
+              <table class="neighbors-table ambiguous-table gt3-table compact-neighbor-table">
+                <colgroup>
+                  <col class="gt3-col-path">
+                  <col class="gt3-col-name">
+                  <col class="gt3-col-key">
+                  <col class="gt3-col-count">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>Path-ID</th>
+                    <th>Mögliche Repeater</th>
+                    <th class="num">Kandidaten</th>
+                    <th class="num">Pakete</th>
+                  </tr>
+                </thead>
+                <tbody>{''.join(ambiguous_rows)}</tbody>
+              </table>
+            </div>
+            """
+        )
+
+    if gt3_unknown:
+        unknown_rows = []
+        for n in gt3_unknown:
+            unknown_rows.append(
+                "<tr>"
+                f"<td class='mono path-id'>{esc(n.path_id)}</td>"
+                "<td class='muted'>nicht bekannt</td>"
+                "<td class='mono key muted'>–</td>"
+                f"<td class='num'>{fmt_int(n.unscoped_gt3_packets)}</td>"
+                "</tr>"
+            )
+
+        gt3_parts.append(
+            f"""
+            <div class="ambiguous-subsection">
+              <h3>Nicht bekannte Path-IDs</h3>
+              <p class="section-intro">
+                Diese Path-IDs konnten keinem aktuell bekannten Repeater
+                zugeordnet werden und werden deshalb ebenfalls nicht als
+                Repeater-Nachbarn gezählt.
+              </p>
+              <table class="neighbors-table gt3-table compact-neighbor-table">
+                <colgroup>
+                  <col class="gt3-col-path">
+                  <col class="gt3-col-name">
+                  <col class="gt3-col-key">
+                  <col class="gt3-col-count">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>Path-ID</th>
+                    <th>Repeater</th>
+                    <th>Public Key</th>
+                    <th class="num">Pakete</th>
+                  </tr>
+                </thead>
+                <tbody>{''.join(unknown_rows)}</tbody>
+              </table>
+            </div>
+            """
+        )
+
+    gt3_html = "".join(gt3_parts)
 
     return f"""<!doctype html>
 <html lang="de">
@@ -1766,11 +1931,59 @@ body {{
   max-width:1100px;
   margin:30px auto;
   padding:0 28px 56px;
-  line-height:1.45;
+  line-height:1.4;
   background:#fff;
 }}
 .report-header {{
+  border-bottom:2px solid var(--fg);
   padding-bottom:18px;
+  margin-bottom:22px;
+}}
+.report-brand {{
+  color:var(--muted);
+  font-size:.82rem;
+  font-weight:700;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}}
+.report-type {{
+  margin:4px 0 3px;
+  font-size:1.7rem;
+}}
+.report-object {{
+  font-size:1.12rem;
+  font-weight:700;
+  margin-top:7px;
+}}
+.report-object-key {{
+  color:var(--muted);
+  font-size:.8rem;
+  margin-top:3px;
+  margin-bottom:16px;
+}}
+.report-context-grid {{
+  display:grid;
+  grid-template-columns:2fr 1fr;
+  gap:14px;
+}}
+.report-context-card {{
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:var(--soft2);
+  padding:10px 12px;
+}}
+.report-context-label {{
+  color:var(--muted);
+  font-size:.78rem;
+  margin-bottom:4px;
+}}
+.report-context-value {{
+  font-weight:700;
+}}
+.report-context-sub {{
+  margin-top:3px;
+  color:var(--muted);
+  font-size:.8rem;
 }}
 .eyebrow {{
   color:var(--muted);
@@ -1855,6 +2068,13 @@ h2 {{
   grid-template-columns:repeat(4,minmax(0,1fr));
   gap:12px;
 }}
+.repeater-kpi-primary-grid {{
+  grid-template-columns:repeat(2,minmax(0,1fr));
+}}
+.repeater-kpi-path-grid {{
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  margin-top:12px;
+}}
 .kpi {{
   border:1px solid var(--line);
   border-radius:9px;
@@ -1863,7 +2083,7 @@ h2 {{
   min-height:104px;
 }}
 .kpi-value {{
-  font-size:1.7rem;
+  font-size:1.05rem;
   font-weight:700;
   line-height:1.08;
   margin-bottom:4px;
@@ -1910,7 +2130,7 @@ h2 {{
   margin-bottom:8px;
 }}
 .routing-value {{
-  font-size:1.7rem;
+  font-size:1.05rem;
   font-weight:700;
   line-height:1.08;
   margin-bottom:4px;
@@ -1961,7 +2181,7 @@ h2 {{
   margin-bottom:8px;
 }}
 .advert-value {{
-  font-size:1.7rem;
+  font-size:1.05rem;
   font-weight:700;
   line-height:1.08;
   margin-bottom:4px;
@@ -2010,6 +2230,78 @@ table {{
 .neighbors-table .neighbor-col-count {{ width:8%; }}
 .neighbors-table .neighbor-col-key {{ width:19%; }}
 
+.repeater-neighbors-table {{
+  margin-top:7px;
+  margin-bottom:12px;
+  font-size:.84rem;
+}}
+.repeater-neighbors-table th {{
+  padding:6px 8px;
+  font-size:.84rem;
+}}
+.repeater-neighbors-table th.num,
+.compact-neighbor-table th.num {{
+  font-weight:700;
+}}
+.repeater-neighbors-table td {{
+  padding:5px 8px;
+  line-height:1.2;
+}}
+.repeater-neighbors-table .neighbor-name {{
+  font-family:Arial,Helvetica,sans-serif;
+  font-size:.84rem;
+  font-weight:400;
+}}
+.repeater-neighbors-table .num {{
+  font-size:.84rem;
+  font-weight:400;
+}}
+.repeater-neighbors-table .key {{
+  font-size:.78rem;
+}}
+.repeater-neighbors-table .path-id {{
+  font-size:.78rem;
+}}
+.neighbor-candidates {{
+  display:grid;
+  gap:2px;
+}}
+.neighbor-candidates > div {{
+  line-height:1.15;
+}}
+.repeater-neighbors-table .neighbor-name .warn,
+.repeater-neighbors-table .neighbor-name .small,
+.repeater-neighbors-table .neighbor-name .muted {{
+  font-size:.74rem;
+  line-height:1.15;
+}}
+.compact-neighbor-table {{
+  margin-top:7px;
+  margin-bottom:12px;
+  font-size:.84rem;
+}}
+.compact-neighbor-table th {{
+  padding:6px 8px;
+  font-size:.84rem;
+}}
+.compact-neighbor-table td {{
+  padding:5px 8px;
+  line-height:1.2;
+}}
+.compact-neighbor-table .neighbor-name {{
+  font-family:Arial,Helvetica,sans-serif;
+  font-size:.84rem;
+  font-weight:400;
+}}
+.compact-neighbor-table .num {{
+  font-size:.84rem;
+  font-weight:400;
+}}
+.compact-neighbor-table .key,
+.compact-neighbor-table .path-id {{
+  font-size:.78rem;
+}}
+
 th,td {{
   border-bottom:1px solid var(--line);
   padding:9px 8px;
@@ -2057,6 +2349,37 @@ summary {{
 .details-inner {{
   padding:4px 15px 16px;
 }}
+.gt3-table {{
+  table-layout:fixed;
+}}
+.gt3-col-path {{
+  width:18%;
+}}
+.gt3-col-name {{
+  width:50%;
+}}
+.gt3-col-key {{
+  width:20%;
+}}
+.gt3-col-count {{
+  width:12%;
+}}
+.gt3-table .path-id {{
+  white-space:nowrap;
+}}
+.gt3-table .muted {{
+  color:var(--muted);
+}}
+.ambiguous-subsection {{
+  margin-top:28px;
+  padding-top:4px;
+}}
+.ambiguous-subsection h3 {{
+  margin-bottom:6px;
+}}
+.ambiguous-table td {{
+  vertical-align:top;
+}}
 .footer {{
   margin-top:36px;
   padding-top:12px;
@@ -2067,6 +2390,7 @@ summary {{
 .selected {{ font-weight:700; }}
 @media (max-width:850px) {{
   .receiver-grid {{ grid-template-columns:1fr 1fr; }}
+  .report-context-grid {{ grid-template-columns:1fr; }}
   .kpi-grid {{ grid-template-columns:1fr 1fr; }}
   .routing-grid {{ grid-template-columns:1fr; }}
   .two-col {{ grid-template-columns:1fr; }}
@@ -2077,30 +2401,96 @@ summary {{
   .kpi-grid {{ grid-template-columns:1fr; }}
   h1 {{ font-size:1.65rem; }}
 }}
+@page {{
+  margin:10mm;
+}}
 @media print {{
   body {{ margin:0;max-width:none;padding:0; }}
   details {{ display:none; }}
-  .kpi,.info-card,tr {{ break-inside:avoid; }}
+  .report-header {{ break-after:avoid-page; }}
+
+  /* Beobachtungsstandort und Beobachtungszeitraum im PDF immer nebeneinander. */
+  .report-context-grid {{
+    grid-template-columns:2fr 1fr !important;
+  }}
+
+
+  h2,h3 {{ break-after:avoid-page; }}
+  .section-intro,.repeater-section-subtitle {{ break-after:avoid-page; }}
+
+  /* Beobachtungskennzahlen und der Beginn der Repeater-Kennzahlen
+     gehören bewusst auf die erste Seite. */
+  .observer-metrics-section {{
+    break-before:auto;
+    margin-top:0;
+  }}
+  .receiver-grid {{
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:10px;
+  }}
+  .repeater-kpi-primary-grid {{
+    grid-template-columns:repeat(2,minmax(0,1fr)) !important;
+  }}
+  .repeater-kpi-path-grid {{
+    grid-template-columns:repeat(3,minmax(0,1fr)) !important;
+    gap:10px;
+  }}
+  .routing-grid {{
+    grid-template-columns:repeat(3,minmax(0,1fr)) !important;
+    gap:10px;
+  }}
+  .info-card {{
+    padding:12px 13px;
+  }}
+  .repeater-section {{
+    break-before:auto;
+    margin-top:24px;
+  }}
+
+  /* Die späteren Haupt-/Unterkapitel bleiben sauber getrennt. */
+  .print-chapter {{ break-before:page; }}
+  .print-subchapter {{ break-before:page; }}
+  .advert-subsection {{
+    break-before:auto;
+    margin-top:24px;
+  }}
+
+  .kpi,.info-card,.routing-card,.advert-card,.assessment {{
+    break-inside:avoid-page;
+  }}
+  table thead {{ display:table-header-group; }}
+  tr {{ break-inside:avoid-page; }}
 }}
 </style>
 </head>
 <body>
 
 <header class="report-header">
-  <div class="eyebrow">MeshCore Repeater Report</div>
-  <h1>{esc(metrics.repeater_name)}</h1>
-  <div class="repeater-key">
-    Public Key:
-    <span class="mono">{esc(metrics.repeater_public_key)}</span>
+  <div class="report-brand">MESHCORE PACKETTAP</div>
+  <h1 class="report-type">Repeater-Report</h1>
+  <div class="report-object">{esc(metrics.repeater_name)}</div>
+  <div class="report-object-key mono">
+    Public Key: {esc(metrics.repeater_public_key)}
+  </div>
+  <div class="report-context-grid">
+    <div class="report-context-card">
+      <div class="report-context-label">Beobachtungsstandort</div>
+      <div class="report-context-value">{esc(metrics.observer_location)}</div>
+      <div class="report-context-sub mono">
+        Public Key: {esc(short_key(metrics.receiver_id, 8, 8))}
+      </div>
+    </div>
+    <div class="report-context-card">
+      <div class="report-context-label">Beobachtungszeitraum</div>
+      <div class="report-context-value">{esc(period_text)}</div>
+    </div>
   </div>
 </header>
 
-<hr class="main-separator">
-
-<section>
-  <h2>Beobachtung</h2>
+<section class="observer-metrics-section">
+  <h2>Kennzahlen des Beobachtungsstandorts</h2>
   <p class="section-intro">
-    Diese Angaben beschreiben den Beobachtungsstandort und den ausgewerteten Zeitraum.
+    Kennzahlen des Beobachtungsstandorts im ausgewerteten Zeitraum.
   </p>
   <div class="receiver-grid">
     {receiver_html}
@@ -2113,10 +2503,13 @@ summary {{
     Die folgenden Werte beziehen sich ausschließlich auf
     <strong>{esc(metrics.repeater_name)}</strong>.
   </p>
-  <div class="kpi-grid">
-    {repeater_kpi_html}
+  <div class="kpi-grid repeater-kpi-primary-grid">
+    {repeater_kpi_primary_html}
   </div>
-  <div class="routing-subsection">
+  <div class="kpi-grid repeater-kpi-path-grid">
+    {repeater_kpi_path_html}
+  </div>
+  <div class="routing-subsection print-subchapter">
     <h3>Routing-Verhalten</h3>
     <p class="section-intro routing-intro">
       Die Routing-Typen zeigen, wie die Pakete geroutet wurden, in deren
@@ -2147,7 +2540,7 @@ summary {{
   </div>
 </section>
 
-<section>
+<section class="print-chapter">
   <h2>Repeater-Nachbarn</h2>
   <p class="section-intro">
     Als Repeater-Nachbarn werden Repeater bezeichnet, die in den beobachteten
@@ -2159,12 +2552,12 @@ summary {{
   {neighbors_html}
 </section>
 
-<section>
+<section class="print-chapter">
   <h2>Unscoped-Nachbarn &gt; 3 Hops</h2>
   {gt3_html}
 </section>
 
-<section>
+<section class="print-chapter">
   <h2>Methodik der Auswertung</h2>
 
   <p class="methodology-intro">
@@ -2179,6 +2572,14 @@ summary {{
     die vom angegebenen Receiver im Beobachtungszeitraum empfangen wurden.
     Vorgänge im Mesh, die der Receiver nicht empfangen hat, können entsprechend
     nicht in die Auswertung einfließen.
+  </p>
+
+  <p class="methodology-intro">
+    <strong>Mehrdeutige Path-IDs:</strong> Wenn eine verkürzte Path-ID aufgrund
+    der verwendeten Path-Hash-Größe zu mehreren bekannten Repeatern passt,
+    wird sie keinem einzelnen Repeater zugerechnet. Im Abschnitt
+    „Unscoped-Nachbarn &gt; 3 Hops“ werden solche Hash-Kollisionen getrennt
+    von eindeutig identifizierten Repeater-Nachbarn ausgewiesen.
   </p>
 
   <p class="methodology-intro">
@@ -2284,7 +2685,7 @@ summary {{
 </section>
 
 <footer class="footer">
-  PacketTap / QuestDB · Report v0.31 · Auswertungstool von DH8IAT
+  MeshCore PacketTap · Repeater-Report
 </footer>
 
 </body>
@@ -2299,7 +2700,7 @@ summary {{
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="MeshCore PacketTap Repeater Report v0.31"
+        description="MeshCore PacketTap Repeater Report v0.49"
     )
 
     p.add_argument(
