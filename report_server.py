@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.39
+MeshCore PacketTap Web UI v0.45
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
@@ -53,7 +53,7 @@ import repeater_report as rr
 import mesh_report as mr
 
 
-APP_VERSION = "0.39"
+APP_VERSION = "0.45"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
 MAP_DIR = BASE_DIR / "map"
@@ -65,6 +65,8 @@ DEFAULT_CONFIG = {
     "questdb_port": 9000,
     "receiver_name": "Stutensee - Spoeck",
     "receiver_id": "",
+    "active_site": "default",
+    "sites": {},
     "output_dir": "reports",
     "web_host": "127.0.0.1",
     "web_port": 8080,
@@ -88,19 +90,78 @@ def esc(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _site_key(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    raw = re.sub(r"[^a-z0-9_-]+", "-", raw)
+    raw = re.sub(r"-+", "-", raw).strip("-_")
+    return raw or "default"
+
+
+def _normalize_site_profile(key: str, value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "name": str(value.get("name") or key).strip() or key,
+        "collector_type": (
+            "companion"
+            if str(value.get("collector_type", "packettap")).strip().lower() == "companion"
+            else "packettap"
+        ),
+        "questdb_host": str(value.get("questdb_host", "")).strip(),
+        "questdb_port": int(value.get("questdb_port", 9000)),
+        "receiver_name": str(value.get("receiver_name", "")).strip(),
+        "receiver_id": str(value.get("receiver_id", "")).strip(),
+        "max_geo_distance_km": max(
+            0.0,
+            float(value.get("max_geo_distance_km", 500.0)),
+        ),
+    }
+
+
 def load_config() -> dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
-
     if CONFIG_FILE.exists():
         raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise RuntimeError("report_config.json muss ein JSON-Objekt enthalten.")
         config.update(raw)
 
-    config["questdb_host"] = str(config["questdb_host"]).strip()
-    config["questdb_port"] = int(config["questdb_port"])
-    config["receiver_name"] = str(config.get("receiver_name", "")).strip()
-    config["receiver_id"] = str(config.get("receiver_id", "")).strip()
+    raw_sites = config.get("sites")
+    if not isinstance(raw_sites, dict) or not raw_sites:
+        raw_sites = {
+            "default": {
+                "name": str(config.get("receiver_name") or "Standard"),
+                "collector_type": "packettap",
+                "questdb_host": config.get("questdb_host", ""),
+                "questdb_port": config.get("questdb_port", 9000),
+                "receiver_name": config.get("receiver_name", ""),
+                "receiver_id": config.get("receiver_id", ""),
+                "max_geo_distance_km": config.get("max_geo_distance_km", 500.0),
+            }
+        }
+
+    sites = {}
+    for raw_key, profile in raw_sites.items():
+        key = _site_key(raw_key)
+        base = key
+        n = 2
+        while key in sites:
+            key = f"{base}-{n}"
+            n += 1
+        sites[key] = _normalize_site_profile(key, profile)
+
+    active_site = _site_key(config.get("active_site"))
+    if active_site not in sites:
+        active_site = next(iter(sites))
+    config["sites"] = sites
+    config["active_site"] = active_site
+
+    active = sites[active_site]
+    config["questdb_host"] = active["questdb_host"]
+    config["questdb_port"] = active["questdb_port"]
+    config["receiver_name"] = active["receiver_name"]
+    config["receiver_id"] = active["receiver_id"]
+
     config["output_dir"] = str(config.get("output_dir", "reports")).strip() or "reports"
     config["web_host"] = str(config.get("web_host", "127.0.0.1")).strip()
     config["web_port"] = int(config.get("web_port", 8080))
@@ -112,24 +173,16 @@ def load_config() -> dict[str, Any]:
     config["receiver_stop"] = str(config.get("receiver_stop", "state/receiver.stop")).strip() or "state/receiver.stop"
     config["importer_lock"] = str(config.get("importer_lock", "state/importer.lock")).strip() or "state/importer.lock"
     config["importer_stop"] = str(config.get("importer_stop", "state/importer.stop")).strip() or "state/importer.stop"
-    config["dashboard_refresh_seconds"] = max(
-        0,
-        int(config.get("dashboard_refresh_seconds", 15)),
-    )
-    config["auto_start_receiver"] = bool(
-        config.get("auto_start_receiver", True)
-    )
-    config["auto_start_importer"] = bool(
-        config.get("auto_start_importer", True)
-    )
+    config["dashboard_refresh_seconds"] = max(0, int(config.get("dashboard_refresh_seconds", 15)))
+    config["auto_start_receiver"] = bool(config.get("auto_start_receiver", True))
+    config["auto_start_importer"] = bool(config.get("auto_start_importer", True))
 
-    def normalize_args(value: Any) -> list[str]:
+    def normalize_args(value):
         if value is None:
             return []
         if isinstance(value, list):
             return [str(item) for item in value if str(item).strip()]
         if isinstance(value, str):
-            # Config strings are accepted for convenience; shell parsing is not used.
             import shlex
             return shlex.split(value, posix=not sys.platform.startswith("win"))
         raise RuntimeError("Script-Argumente müssen als Liste oder Text angegeben werden.")
@@ -138,8 +191,43 @@ def load_config() -> dict[str, Any]:
     if "--append" not in config["receiver_args"]:
         config["receiver_args"].append("--append")
     config["importer_args"] = normalize_args(config.get("importer_args", ["--follow"]))
-
     return config
+
+
+def resolve_site_key(config: dict[str, Any], requested_site: str | None = None) -> str:
+    sites = config.get("sites") or {}
+    requested = _site_key(requested_site) if requested_site else ""
+    if requested and requested in sites:
+        return requested
+    active = _site_key(config.get("active_site"))
+    if active in sites:
+        return active
+    if sites:
+        return next(iter(sites))
+    raise RuntimeError("Kein Beobachtungsstandort konfiguriert.")
+
+
+def site_config(config: dict[str, Any], requested_site: str | None = None) -> dict[str, Any]:
+    key = resolve_site_key(config, requested_site)
+    profile = config["sites"][key]
+    effective = dict(config)
+    effective["site_key"] = key
+    effective["site_name"] = profile["name"]
+    effective["collector_type"] = profile.get("collector_type", "packettap")
+    effective["questdb_host"] = profile["questdb_host"]
+    effective["questdb_port"] = profile["questdb_port"]
+    effective["receiver_name"] = profile["receiver_name"]
+    effective["receiver_id"] = profile["receiver_id"]
+    effective["max_geo_distance_km"] = profile.get("max_geo_distance_km", 500.0)
+    return effective
+
+
+def site_url(path: str, site_key: str, **params: Any) -> str:
+    payload = {"site": site_key}
+    for key, value in params.items():
+        if value is not None and str(value) != "":
+            payload[key] = str(value)
+    return path + "?" + urllib.parse.urlencode(payload)
 
 
 def save_config(config: dict[str, Any]) -> None:
@@ -289,6 +377,7 @@ def generate_report(
         neighbors_gt3,
         ranking,
         contacts,
+        site_name=config.get("site_name"),
     )
 
     return report_html, filename, selected
@@ -339,6 +428,16 @@ def generate_mesh_report(
     )
 
     geo_repeaters = mr.load_geo_repeaters(db)
+    geo_contacts = mr.load_geo_contacts(db)
+    observer_geo = mr.observer_geo_from_contacts(
+        geo_contacts,
+        observer_id,
+    )
+    geo_repeaters, rejected_geo = mr.filter_geo_by_observer_distance(
+        geo_repeaters,
+        observer_geo,
+        config.get("max_geo_distance_km", 500.0),
+    )
     extent, observed_geo = mr.analyze_extent(
         repeaters,
         geo_repeaters,
@@ -377,6 +476,8 @@ def generate_mesh_report(
         direct_neighbors,
         extent,
         observed_geo,
+        observer_geo,
+        site_name=config.get("site_name"),
     )
 
     return report_html, filename
@@ -434,6 +535,16 @@ def build_mesh_overview(
         resolver,
     )
     geo_repeaters = mr.load_geo_repeaters(db)
+    geo_contacts = mr.load_geo_contacts(db)
+    observer_geo = mr.observer_geo_from_contacts(
+        geo_contacts,
+        observer_id,
+    )
+    geo_repeaters, rejected_geo = mr.filter_geo_by_observer_distance(
+        geo_repeaters,
+        observer_geo,
+        config.get("max_geo_distance_km", 500.0),
+    )
     extent, observed_geo = mr.analyze_extent(
         repeaters,
         geo_repeaters,
@@ -443,11 +554,14 @@ def build_mesh_overview(
         observed_geo,
         observer_id,
         extent,
+        observer_geo,
     )
 
     summary = {
         "repeaters": len(repeaters),
         "geo_repeaters": len(observed_geo),
+        "rejected_geo": len(rejected_geo),
+        "max_geo_distance_km": config.get("max_geo_distance_km", 500.0),
         "date_from": date_from,
         "date_to": date_to,
     }
@@ -627,6 +741,8 @@ def preview_page(
     token: str,
     message: str = "",
     error: bool = False,
+    config: dict[str, Any] | None = None,
+    site_key: str | None = None,
 ) -> bytes:
     _, meta = load_preview(token)
     title = str(meta.get("title") or "Report-Vorschau")
@@ -665,7 +781,7 @@ def preview_page(
   ></iframe>
 </div>
 """
-    return page(title, body)
+    return page(title, body, config=config, site_key=site_key)
 
 
 def fmt_int(value: int | None) -> str:
@@ -1102,7 +1218,15 @@ def format_age(age_seconds: float | None) -> str:
 
 
 def latest_packet_status(config: dict[str, Any]) -> tuple[str, str, float | None]:
-    query = urllib.parse.quote("select max(ts) latest_ts from mc_rx")
+    receiver_id = config.get("receiver_id") or None
+    receiver_name = config.get("receiver_name") or None
+    rf = rr.receiver_filter(receiver_id, receiver_name)
+
+    sql = "select max(ts) latest_ts from mc_rx"
+    if rf:
+        sql += " where " + rf
+
+    query = urllib.parse.quote(sql)
     url = f"http://{config['questdb_host']}:{config['questdb_port']}/exec?query={query}"
     try:
         with urllib.request.urlopen(url, timeout=3) as response:
@@ -1225,14 +1349,20 @@ def dashboard_page(
         "Import",
     )
 
-    pipeline_ok, pipeline_label, pipeline_detail = pipeline_state(
-        db_ok,
-        receiver_ok,
-        importer_ok,
-        packet_age,
-        receiver_age,
-        importer_age,
-    )
+    if config.get("collector_type") == "companion":
+        pipeline_ok = db_ok and packet_age is not None and packet_age <= 300
+        pipeline_label = "Aktuell" if pipeline_ok else ("Störung" if not db_ok else "Keine aktuelle Aktivität")
+        pipeline_detail = (
+            "QuestDB ist erreichbar und der ausgewählte Companion liefert aktuelle Daten."
+            if pipeline_ok else (
+                "QuestDB ist nicht erreichbar." if not db_ok
+                else "Seit mehr als 5 Minuten kein neues Paket dieses Receivers in QuestDB."
+            )
+        )
+    else:
+        pipeline_ok, pipeline_label, pipeline_detail = pipeline_state(
+            db_ok, receiver_ok, importer_ok, packet_age, receiver_age, importer_age,
+        )
 
     def status_card(
         title: str,
@@ -1280,8 +1410,23 @@ def dashboard_page(
     if packet_age_text:
         quest_detail += f" · {packet_age_text}"
 
+    site_name = config.get("site_name") or config.get("receiver_name") or "–"
+    collector_type = config.get("collector_type", "packettap")
+    site_info = f"""
+<div class="card">
+  <h2>Aktiver Beobachtungsstandort</h2>
+  <div class="grid">
+    <div><div class="help">Standort</div><strong>{esc(site_name)}</strong></div>
+    <div><div class="help">Datenquelle</div><strong>{esc("TCP Companion" if collector_type == "companion" else "PacketTap Receiver")}</strong></div>
+    <div><div class="help">Receiver</div><strong>{esc(config.get("receiver_name") or "–")}</strong></div>
+    <div><div class="help">QuestDB</div><strong>{esc(config["questdb_host"])}:{esc(config["questdb_port"])}</strong></div>
+  </div>
+</div>
+"""
+
     body = f"""
 {msg_html}
+{site_info}
 <div class="card">
   <div class="dashboard-heading">
     <div>
@@ -1299,32 +1444,21 @@ def dashboard_page(
   </div>
 
   <div class="status-grid">
-    {status_card(
-        "QuestDB",
-        db_ok,
-        "OK" if db_ok else "Nicht erreichbar",
-        quest_main,
-        quest_detail,
+    {status_card("QuestDB", db_ok, "OK" if db_ok else "Nicht erreichbar", quest_main, quest_detail)}
+    {(
+        status_card(Path(receiver_script).name, receiver_ok, "Läuft" if receiver_ok else "Gestoppt", receiver_activity,
+                    receiver_activity_detail + (f" · {receiver_detail}" if receiver_detail else ""), "receiver")
+        if collector_type == "packettap"
+        else status_card("TCP Companion", True, "Remote", config.get("receiver_name") or "Companion",
+                         "Der Companion-Collector wird am Beobachtungsstandort betrieben.")
     )}
-    {status_card(
-        Path(receiver_script).name,
-        receiver_ok,
-        "Läuft" if receiver_ok else "Gestoppt",
-        receiver_activity,
-        receiver_activity_detail + (
-            f" · {receiver_detail}" if receiver_detail else ""
-        ),
-        "receiver",
-    )}
-    {status_card(
-        Path(importer_script).name,
-        importer_ok,
-        "Läuft" if importer_ok else "Gestoppt",
-        importer_activity,
-        importer_activity_detail + (
-            f" · {importer_detail}" if importer_detail else ""
-        ),
-        "importer",
+    {(
+        status_card(Path(importer_script).name, importer_ok, "Läuft" if importer_ok else "Gestoppt", importer_activity,
+                    importer_activity_detail + (f" · {importer_detail}" if importer_detail else ""), "importer")
+        if collector_type == "packettap"
+        else status_card("Datenerfassung", db_ok and packet_age is not None and packet_age <= 300,
+                         "Aktuell" if packet_age is not None and packet_age <= 300 else "Prüfen", packet_time,
+                         "Letztes Paket dieses Receivers" + (f" · {packet_age_text}" if packet_age_text else ""))
     )}
   </div>
 
@@ -1335,15 +1469,46 @@ def dashboard_page(
 </div>
 """
     return page(
-        "PacketTap Übersicht",
-        body,
-        refresh_seconds=refresh_seconds,
+        "PacketTap Übersicht", body, refresh_seconds=refresh_seconds,
+        config=config, site_key=config.get("site_key"),
     )
 
 
 
 
-def page(title: str, body: str, refresh_seconds: int = 0) -> bytes:
+def page(
+    title: str,
+    body: str,
+    refresh_seconds: int = 0,
+    config: dict[str, Any] | None = None,
+    site_key: str | None = None,
+) -> bytes:
+    if config is None:
+        config = load_config()
+    site_key = resolve_site_key(config, site_key)
+    current_site = config["sites"][site_key]
+    site_options = "".join(
+        f'<option value="{esc(key)}"' + (" selected" if key == site_key else "") + f'>{esc(profile["name"])}</option>'
+        for key, profile in config["sites"].items()
+    )
+    site_switcher = f"""
+    <div class="site-switcher">
+      <span>Standort</span>
+      <select id="site-switcher-select" aria-label="Beobachtungsstandort">{site_options}</select>
+    </div>
+    <script>
+    document.addEventListener("DOMContentLoaded", function() {{
+      const select = document.getElementById("site-switcher-select");
+      if (!select) return;
+      select.addEventListener("change", function() {{
+        const url = new URL(window.location.href);
+        url.searchParams.set("site", select.value);
+        window.location.href = url.pathname + "?" + url.searchParams.toString();
+      }});
+    }});
+    </script>
+    """
+    nav_suffix = "?" + urllib.parse.urlencode({"site": site_key})
     doc = f"""<!doctype html>
 <html lang="de">
 <head>
@@ -1380,6 +1545,16 @@ header {{
   padding-bottom:14px;
   margin-bottom:28px;
 }}
+.header-right {{display:flex;flex-direction:column;gap:10px;align-items:flex-end;}}
+.site-switcher {{display:flex;align-items:center;gap:8px;font-size:.82rem;color:var(--muted);}}
+.site-switcher select {{width:auto;min-width:210px;padding:7px 9px;font-size:.88rem;}}
+.site-meta {{margin-top:5px;color:var(--muted);font-size:.78rem;}}
+.site-card {{border:1px solid var(--line);border-radius:10px;background:var(--soft);padding:14px;margin:14px 0;}}
+.site-card h3 {{margin:0 0 12px;}}
+.site-card .site-key {{color:var(--muted);font-size:.76rem;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;margin-top:-8px;margin-bottom:12px;}}
+.site-card-actions {{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;}}
+button.danger {{background:#8f2d25;}}
+button.danger:hover {{background:#75221c;}}
 h1 {{ margin:0; font-size:1.75rem; }}
 nav a {{
   color:var(--fg);
@@ -1400,6 +1575,36 @@ nav a:hover {{ text-decoration:underline; }}
   gap:16px;
 }}
 .field {{ margin-bottom:16px; }}
+.mesh-generate-card {{
+  padding:20px 24px;
+}}
+.mesh-generate-card h2 {{
+  margin:0 0 6px;
+}}
+.mesh-generate-help {{
+  margin:0 0 12px;
+}}
+.mesh-observer {{
+  margin:0 0 12px;
+  padding:9px 12px;
+}}
+.mesh-observer .receiver-detail {{
+  margin-left:6px;
+  color:var(--muted);
+  font-size:.82rem;
+}}
+.mesh-generate-card .grid {{
+  gap:14px;
+}}
+.mesh-generate-card .field {{
+  margin-bottom:8px;
+}}
+.mesh-generate-card label {{
+  margin-bottom:5px;
+}}
+.mesh-generate-card button {{
+  margin-top:0;
+}}
 label {{
   display:block;
   font-size:.88rem;
@@ -1550,7 +1755,7 @@ button:hover, .button:hover {{ opacity:.88; }}
 }}
 .mesh-overview-facts {{
   display:grid;
-  grid-template-columns:2fr 1fr 1fr;
+  grid-template-columns:2fr 1fr 1fr 1fr;
   gap:10px;
   margin:12px 0 14px;
 }}
@@ -2006,14 +2211,18 @@ footer {{
   <div>
     <div class="help">MeshCore</div>
     <h1>PacketTap</h1>
+    <div class="site-meta">{esc(current_site["name"])} · {esc(current_site["collector_type"])}</div>
   </div>
-  <nav>
-    <a href="/">Übersicht</a>
-    <a href="/mesh">Mesh</a>
-    <a href="/report">Repeater</a>
-    <a href="/neighbors">Nachbarn</a>
-    <a href="/settings">Einstellungen</a>
-  </nav>
+  <div class="header-right">
+    {site_switcher}
+    <nav>
+      <a href="/{nav_suffix}">Übersicht</a>
+      <a href="/mesh{nav_suffix}">Mesh</a>
+      <a href="/report{nav_suffix}">Repeater</a>
+      <a href="/neighbors{nav_suffix}">Nachbarn</a>
+      <a href="/settings{nav_suffix}">Einstellungen</a>
+    </nav>
+  </div>
 </header>
 {body}
 <footer>Report Web UI v{APP_VERSION}</footer>
@@ -2860,9 +3069,36 @@ def neighbor_page(
                 config.get("receiver_id") or None,
                 config.get("receiver_name") or None,
             )
+            observer_display_name = (
+                config.get("site_name")
+                or observer_name
+                or "–"
+            )
+            observer_receiver_detail = (
+                f"Receiver: {observer_name} · "
+                f"Public Key: {mr.short_receiver_key(observer_id)}"
+                if config.get("site_name")
+                and rr.norm(config.get("site_name")) != rr.norm(observer_name)
+                else f"Public Key: {mr.short_receiver_key(observer_id)}"
+            )
 
             receiver_geo = geo.get(rr.norm(observer_id))
             neighbor_geo = geo.get(selected.public_key)
+
+            geo_position_rejected = False
+            if receiver_geo is not None and neighbor_geo is not None:
+                max_geo_distance = float(config.get("max_geo_distance_km", 500.0))
+                if (
+                    max_geo_distance > 0
+                    and mr.haversine_km(
+                        receiver_geo.lat,
+                        receiver_geo.lon,
+                        neighbor_geo.lat,
+                        neighbor_geo.lon,
+                    ) > max_geo_distance
+                ):
+                    neighbor_geo = None
+                    geo_position_rejected = True
 
             distance_text = "–"
             direction_text = "–"
@@ -2882,6 +3118,15 @@ def neighbor_page(
                 observer_name or "Receiver",
                 selected.adv_name or selected.public_key[:8],
             )
+            if geo_position_rejected:
+                map_html = (
+                    "<div class='neighbor-empty'>"
+                    "Die Advert-Position dieses Nachbarn liegt mehr als "
+                    f"{esc(config.get('max_geo_distance_km', 500.0))} km "
+                    "vom Beobachtungsstandort entfernt und wird als unplausibel "
+                    "ausgefiltert. Die Rohkoordinaten bleiben in QuestDB erhalten."
+                    "</div>"
+                )
 
             direct_adverts, flood_advert = neighbor_advert_summary(
                 config,
@@ -2933,9 +3178,9 @@ def neighbor_page(
     <div class="report-doc-context">
       <div class="report-doc-card">
         <div class="report-doc-label">Beobachtungsstandort</div>
-        <div class="report-doc-value">{esc(observer_name)}</div>
-        <div class="report-doc-sub mono">
-          Public Key: {esc(mr.short_receiver_key(observer_id))}
+        <div class="report-doc-value">{esc(observer_display_name)}</div>
+        <div class="report-doc-sub">
+          {esc(observer_receiver_detail)}
         </div>
       </div>
       <div class="report-doc-card">
@@ -2947,6 +3192,7 @@ def neighbor_page(
     </div>
     {"" if export_mode else f"""
     <form class="neighbor-save-actions" method="post" action="/save-neighbor">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
       <input type="hidden" name="neighbor" value="{esc(selected.public_key)}">
       <input type="hidden" name="date_from" value="{esc(date_from)}">
       <input type="hidden" name="date_to" value="{esc(date_to)}">
@@ -3053,6 +3299,7 @@ def neighbor_page(
   </p>
 
   <form method="get" action="/neighbors">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
     <div class="field">
       <label for="neighbor">Nachbar</label>
       <input
@@ -3093,7 +3340,7 @@ def neighbor_page(
 {selection_html}
 {details_html}
 """
-    return page("Nachbarn", body)
+    return page("Nachbarn", body, config=config, site_key=config.get("site_key"))
 
 
 def neighbor_export_page(
@@ -3124,6 +3371,19 @@ def neighbor_export_page(
                 + export_details[end + len("</div>\n\n  <div class=\"neighbor-kpis\">"):]
             )
 
+    observer_display_name = (
+        config.get("site_name")
+        or observer_name
+        or "–"
+    )
+    observer_receiver_detail = (
+        f"Receiver: {observer_name} · "
+        f"Public Key: {mr.short_receiver_key(observer_id)}"
+        if config.get("site_name")
+        and rr.norm(config.get("site_name")) != rr.norm(observer_name)
+        else f"Public Key: {mr.short_receiver_key(observer_id)}"
+    )
+
     report_header = f"""
 <header class="neighbor-report-header">
   <div class="neighbor-report-kicker">MESHCORE PACKETTAP</div>
@@ -3135,8 +3395,8 @@ def neighbor_export_page(
   <div class="neighbor-report-meta">
     <div>
       <span>Beobachtungsstandort</span>
-      <strong>{esc(observer_name or "–")}</strong>
-      <small class="mono">Public Key: {esc(mr.short_receiver_key(observer_id))}</small>
+      <strong>{esc(observer_display_name)}</strong>
+      <small>{esc(observer_receiver_detail)}</small>
     </div>
     <div>
       <span>Beobachtungszeitraum</span>
@@ -3590,6 +3850,7 @@ def form_page(
   </p>
 
   <form method="post" action="/generate">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
     <div class="field">
       <label for="repeater">Repeater</label>
       <input
@@ -3621,7 +3882,7 @@ def form_page(
   </form>
 </div>
 """
-    return page("Repeater Report", body)
+    return page("Repeater Report", body, config=config, site_key=config.get("site_key"))
 
 
 def mesh_form_page(
@@ -3649,25 +3910,41 @@ def mesh_form_page(
         mesh_map_summary = {
             "repeaters": "–",
             "geo_repeaters": "–",
+            "rejected_geo": "–",
+            "max_geo_distance_km": config.get("max_geo_distance_km", 500.0),
             "date_from": map_from,
             "date_to": map_to,
         }
 
+    mesh_site_name = (
+        config.get("site_name")
+        or config.get("receiver_name")
+        or "nicht konfiguriert"
+    )
+    mesh_receiver_name = config.get("receiver_name") or ""
+    mesh_receiver_detail = (
+        f"Receiver: {mesh_receiver_name}"
+        if mesh_receiver_name
+        and rr.norm(mesh_site_name) != rr.norm(mesh_receiver_name)
+        else ""
+    )
+
     body = f"""
 {msg_html}
-<div class="card">
+<div class="card mesh-generate-card">
   <h2>Mesh Report erzeugen</h2>
-  <p class="help">
-    Erstellt einen standortbezogenen Report über das vom konfigurierten
-    PacketTap-Receiver beobachtete Mesh. Repeater-Auswahl ist nicht notwendig.
+  <p class="help mesh-generate-help">
+    Standortbezogenen Mesh-Report für den gewählten Zeitraum erzeugen.
   </p>
 
-  <div class="message">
+  <div class="message mesh-observer">
     <strong>Beobachtungsstandort:</strong>
-    {esc(config.get('receiver_name') or 'nicht konfiguriert')}
+    {esc(mesh_site_name)}
+    {f'<span class="receiver-detail">{esc(mesh_receiver_detail)}</span>' if mesh_receiver_detail else ''}
   </div>
 
   <form method="post" action="/generate-mesh">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
     <div class="grid">
       <div class="field">
         <label for="date_from">Von</label>
@@ -3702,190 +3979,140 @@ def mesh_form_page(
       <strong>{esc(mesh_map_summary['repeaters'])}</strong>
     </div>
     <div class="mesh-overview-fact">
-      <span class="fact-label">Mit bekannten Koordinaten</span>
+      <span class="fact-label">Mit plausiblen Koordinaten</span>
       <strong>{esc(mesh_map_summary['geo_repeaters'])}</strong>
     </div>
+    <div class="mesh-overview-fact">
+      <span class="fact-label">Positionen ausgefiltert</span>
+      <strong>{esc(mesh_map_summary['rejected_geo'])}</strong>
+    </div>
+  </div>
+  <div class="help" style="margin:-4px 0 12px">
+    Kartenfilter: maximal {esc(mesh_map_summary['max_geo_distance_km'])} km Entfernung
+    zum Beobachtungsstandort. Rohkoordinaten in QuestDB bleiben erhalten.
   </div>
   {mesh_map_html}
 </section>
 """
-    return page("Mesh Report", body)
+    return page("Mesh Report", body, config=config, site_key=config.get("site_key"))
 
 
-def settings_page(
-    config: dict[str, Any],
-    message: str = "",
-    error: bool = False,
-) -> bytes:
+def settings_page(config: dict[str, Any], message: str = "", error: bool = False) -> bytes:
     msg_html = ""
     if message:
-        cls = "error" if error else "ok"
-        msg_html = f'<div class="message {cls}">{esc(message)}</div>'
+        msg_html = f'<div class="message {"error" if error else "ok"}">{esc(message)}</div>'
+
+    site_cards = []
+    for key, profile in config["sites"].items():
+        site_cards.append(f"""
+<div class="site-card">
+  <h3>{esc(profile["name"])}</h3>
+  <div class="grid">
+    <div class="field"><label>Profil-ID</label><input name="site__{esc(key)}__key" value="{esc(key)}" required></div>
+    <div class="field"><label>Anzeigename</label><input name="site__{esc(key)}__name" value="{esc(profile["name"])}" required></div>
+    <div class="field"><label>Erfassungsweg</label><select name="site__{esc(key)}__collector_type">
+      <option value="packettap"{" selected" if profile.get("collector_type") == "packettap" else ""}>PacketTap Receiver</option>
+      <option value="companion"{" selected" if profile.get("collector_type") == "companion" else ""}>TCP Companion</option>
+    </select></div>
+    <div class="field"><label>QuestDB Host</label><input name="site__{esc(key)}__questdb_host" value="{esc(profile["questdb_host"])}" required></div>
+    <div class="field"><label>QuestDB Port</label><input name="site__{esc(key)}__questdb_port" type="number" value="{esc(profile["questdb_port"])}" required></div>
+    <div class="field"><label>Receiver Name</label><input name="site__{esc(key)}__receiver_name" value="{esc(profile["receiver_name"])}"></div>
+    <div class="field"><label>Receiver Public Key / ID</label><input name="site__{esc(key)}__receiver_id" value="{esc(profile["receiver_id"])}"></div>
+    <div class="field">
+      <label>Maximale Kartenentfernung (km)</label>
+      <input name="site__{esc(key)}__max_geo_distance_km"
+             type="number" min="0" step="10"
+             value="{esc(profile.get("max_geo_distance_km", 500.0))}">
+      <div class="help">0 = Distanzfilter deaktivieren. Standard: 500 km.</div>
+    </div>
+  </div>
+  <div class="site-card-actions">
+    <a class="button secondary" href="{esc(site_url('/test-site', key))}">Verbindung testen</a>
+    <button
+      class="danger"
+      type="submit"
+      name="delete_site"
+      value="{esc(key)}"
+      onclick="return confirm('Standort wirklich löschen?');"
+    >Standort löschen</button>
+  </div>
+</div>""")
+
+    active_options = "".join(
+        f'<option value="{esc(key)}"' + (" selected" if key == config["active_site"] else "") + f'>{esc(p["name"])}</option>'
+        for key, p in config["sites"].items()
+    )
 
     body = f"""
 {msg_html}
 <div class="card">
-  <h2>Einstellungen</h2>
+  <h2>Beobachtungsstandorte</h2>
   <p class="help">
-    Diese Werte werden in <span class="mono">report_config.json</span>
-    gespeichert. Änderungen an Web Host oder Web Port werden erst nach einem
-    Neustart des Servers aktiv.
+    QuestDB und Receiver-Identität werden als gemeinsames Standortprofil gespeichert.
+    Der Standort-Umschalter oben wechselt immer das vollständige Profil.
+    Die Profil-ID ist editierbar und wird als <span class="mono">site=</span>-Wert in URLs verwendet.
   </p>
-
   <form method="post" action="/settings">
-    <div class="grid">
-      <div class="field">
-        <label for="questdb_host">QuestDB Host</label>
-        <input id="questdb_host" name="questdb_host"
-               value="{esc(config['questdb_host'])}" required>
-      </div>
-      <div class="field">
-        <label for="questdb_port">QuestDB Port</label>
-        <input id="questdb_port" name="questdb_port" type="number"
-               value="{esc(config['questdb_port'])}" required>
-      </div>
-    </div>
-
-    <div class="field">
-      <label for="receiver_name">Receiver Name</label>
-      <input id="receiver_name" name="receiver_name"
-             value="{esc(config.get('receiver_name', ''))}">
-    </div>
-
-    <div class="field">
-      <label for="receiver_id">Receiver Public Key / ID</label>
-      <input id="receiver_id" name="receiver_id"
-             value="{esc(config.get('receiver_id', ''))}">
-      <div class="help">
-        Optional. Leer lassen, wenn über den Receiver-Namen gefiltert wird.
-      </div>
-    </div>
-
-    <div class="field">
-      <label for="output_dir">Ausgabeordner</label>
-      <input id="output_dir" name="output_dir"
-             value="{esc(config['output_dir'])}" required>
-    </div>
-
-    <div class="grid">
-      <div class="field">
-        <label for="log_dir">Log-Verzeichnis</label>
-        <input id="log_dir" name="log_dir"
-               value="{esc(config['log_dir'])}" required>
-      </div>
-      <div class="field">
-        <label for="importer_state">Importer Checkpoint-Datei</label>
-        <input id="importer_state" name="importer_state"
-               value="{esc(config['importer_state'])}" required>
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="field">
-        <label for="receiver_script">Receiver Script</label>
-        <input id="receiver_script" name="receiver_script"
-               value="{esc(config['receiver_script'])}" required>
-      </div>
-      <div class="field">
-        <label for="importer_script">Importer Script</label>
-        <input id="importer_script" name="importer_script"
-               value="{esc(config['importer_script'])}" required>
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="field">
-        <label for="receiver_args">Receiver Argumente</label>
-        <input id="receiver_args" name="receiver_args"
-               value="{esc(' '.join(config['receiver_args']))}"
-               placeholder="optional">
-      </div>
-      <div class="field">
-        <label for="importer_args">Importer Argumente</label>
-        <input id="importer_args" name="importer_args"
-               value="{esc(' '.join(config['importer_args']))}"
-               placeholder="z. B. --follow">
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="field">
-        <label for="receiver_lock">Receiver Lock-Datei</label>
-        <input id="receiver_lock" name="receiver_lock"
-               value="{esc(config['receiver_lock'])}" required>
-      </div>
-      <div class="field">
-        <label for="receiver_stop">Receiver Stop-Datei</label>
-        <input id="receiver_stop" name="receiver_stop"
-               value="{esc(config['receiver_stop'])}" required>
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="field">
-        <label for="importer_lock">Importer Lock-Datei</label>
-        <input id="importer_lock" name="importer_lock"
-               value="{esc(config['importer_lock'])}" required>
-      </div>
-      <div class="field">
-        <label for="importer_stop">Importer Stop-Datei</label>
-        <input id="importer_stop" name="importer_stop"
-               value="{esc(config['importer_stop'])}" required>
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="field">
-        <label>
-          <input type="checkbox"
-                 name="auto_start_receiver"
-                 value="1"
-                 {'checked' if config['auto_start_receiver'] else ''}>
-          Receiver beim Start der Weboberfläche automatisch starten
-        </label>
-      </div>
-      <div class="field">
-        <label>
-          <input type="checkbox"
-                 name="auto_start_importer"
-                 value="1"
-                 {'checked' if config['auto_start_importer'] else ''}>
-          Importer beim Start der Weboberfläche automatisch starten
-        </label>
-      </div>
-    </div>
-
-    <div class="field">
-      <label for="dashboard_refresh_seconds">Dashboard Refresh (Sekunden)</label>
-      <input id="dashboard_refresh_seconds"
-             name="dashboard_refresh_seconds"
-             type="number"
-             min="0"
-             value="{esc(config['dashboard_refresh_seconds'])}" required>
-      <div class="help">0 = automatische Aktualisierung deaktiviert.</div>
-    </div>
-
-    <div class="grid">
-      <div class="field">
-        <label for="web_host">Web Host</label>
-        <input id="web_host" name="web_host"
-               value="{esc(config['web_host'])}" required>
-        <div class="help">
-          Windows lokal: 127.0.0.1 · Linux/LAN später: 0.0.0.0
+    <input type="hidden" name="site" value="{esc(config.get('site_key', config['active_site']))}">
+    <div class="field"><label for="active_site">Standard-Standort</label><select id="active_site" name="active_site">{active_options}</select></div>
+    {''.join(site_cards)}
+    <div class="site-card">
+      <h3>Neuen Standort hinzufügen</h3>
+      <div class="grid">
+        <div class="field"><label>Profil-ID</label><input name="new_site_key" placeholder="z. B. hornisgrinde"></div>
+        <div class="field"><label>Anzeigename</label><input name="new_site_name"></div>
+        <div class="field"><label>Erfassungsweg</label><select name="new_site_collector_type"><option value="packettap">PacketTap Receiver</option><option value="companion">TCP Companion</option></select></div>
+        <div class="field"><label>QuestDB Host</label><input name="new_site_questdb_host"></div>
+        <div class="field"><label>QuestDB Port</label><input name="new_site_questdb_port" type="number" value="9000"></div>
+        <div class="field"><label>Receiver Name</label><input name="new_site_receiver_name"></div>
+        <div class="field"><label>Receiver Public Key / ID</label><input name="new_site_receiver_id"></div>
+        <div class="field">
+          <label>Maximale Kartenentfernung (km)</label>
+          <input name="new_site_max_geo_distance_km" type="number" min="0" step="10" value="500">
+          <div class="help">0 = Distanzfilter deaktivieren.</div>
         </div>
       </div>
-      <div class="field">
-        <label for="web_port">Web Port</label>
-        <input id="web_port" name="web_port" type="number"
-               value="{esc(config['web_port'])}" required>
-      </div>
     </div>
-
+    <h2>Globale Einstellungen</h2>
+    <div class="field"><label>Ausgabeordner</label><input name="output_dir" value="{esc(config['output_dir'])}" required></div>
+    <div class="grid">
+      <div class="field"><label>Log-Verzeichnis</label><input name="log_dir" value="{esc(config['log_dir'])}" required></div>
+      <div class="field"><label>Importer Checkpoint-Datei</label><input name="importer_state" value="{esc(config['importer_state'])}" required></div>
+      <div class="field"><label>Receiver Script</label><input name="receiver_script" value="{esc(config['receiver_script'])}" required></div>
+      <div class="field"><label>Importer Script</label><input name="importer_script" value="{esc(config['importer_script'])}" required></div>
+      <div class="field"><label>Receiver Argumente</label><input name="receiver_args" value="{esc(' '.join(config['receiver_args']))}"></div>
+      <div class="field"><label>Importer Argumente</label><input name="importer_args" value="{esc(' '.join(config['importer_args']))}"></div>
+      <div class="field"><label>Receiver Lock-Datei</label><input name="receiver_lock" value="{esc(config['receiver_lock'])}" required></div>
+      <div class="field"><label>Receiver Stop-Datei</label><input name="receiver_stop" value="{esc(config['receiver_stop'])}" required></div>
+      <div class="field"><label>Importer Lock-Datei</label><input name="importer_lock" value="{esc(config['importer_lock'])}" required></div>
+      <div class="field"><label>Importer Stop-Datei</label><input name="importer_stop" value="{esc(config['importer_stop'])}" required></div>
+    </div>
+    <div class="grid">
+      <div class="field"><label><input type="checkbox" name="auto_start_receiver" value="1" {'checked' if config['auto_start_receiver'] else ''}> Receiver automatisch starten</label></div>
+      <div class="field"><label><input type="checkbox" name="auto_start_importer" value="1" {'checked' if config['auto_start_importer'] else ''}> Importer automatisch starten</label></div>
+      <div class="field"><label>Dashboard Refresh (Sekunden)</label><input name="dashboard_refresh_seconds" type="number" min="0" value="{esc(config['dashboard_refresh_seconds'])}" required></div>
+      <div class="field"><label>Web Host</label><input name="web_host" value="{esc(config['web_host'])}" required></div>
+      <div class="field"><label>Web Port</label><input name="web_port" type="number" value="{esc(config['web_port'])}" required></div>
+    </div>
     <button type="submit">Einstellungen speichern</button>
   </form>
-</div>
-"""
-    return page("Einstellungen", body)
+</div>"""
+    return page("Einstellungen", body, config=config, site_key=config.get("site_key"))
+
+
+def test_site_page(base_config: dict[str, Any], site_key: str) -> bytes:
+    effective = site_config(base_config, site_key)
+    ok, detail = questdb_status(effective)
+    packet_time, packet_age_text, _ = latest_packet_status(effective) if ok else ("–", "", None)
+    body = f"""
+<div class="card">
+  <h2>Standorttest – {esc(effective['site_name'])}</h2>
+  <p><strong>QuestDB:</strong> {"OK" if ok else "Nicht erreichbar"} · {esc(detail)}</p>
+  <p><strong>Receiver:</strong> {esc(effective.get('receiver_name') or '–')}</p>
+  <p><strong>Letztes Paket dieses Receivers:</strong> {esc(packet_time)} {esc(packet_age_text)}</p>
+  <a class="button" href="{esc(site_url('/settings', site_key))}">Zurück zu Einstellungen</a>
+</div>"""
+    return page("Standorttest", body, config=base_config, site_key=site_key)
 
 
 def auto_start_services(config: dict[str, Any]) -> None:
@@ -4027,7 +4254,11 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
 
         try:
-            config = load_config()
+            base_config = load_config()
+            query_args = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            requested_site = query_args.get("site", [None])[-1]
+            current_site = resolve_site_key(base_config, requested_site)
+            config = site_config(base_config, current_site)
 
             if path.startswith("/map/"):
                 asset = map_asset_path(path)
@@ -4091,7 +4322,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/settings":
-                self.send_html(settings_page(config))
+                settings_config = dict(base_config)
+                settings_config["site_key"] = current_site
+                self.send_html(settings_page(settings_config))
+                return
+
+            if path == "/test-site":
+                self.send_html(test_site_page(base_config, current_site))
                 return
 
             if path.startswith("/preview/"):
@@ -4107,6 +4344,8 @@ class Handler(BaseHTTPRequestHandler):
                         token,
                         message=message,
                         error=error,
+                        config=base_config,
+                        site_key=current_site,
                     )
                 )
                 return
@@ -4164,8 +4403,10 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
 
         try:
-            config = load_config()
+            base_config = load_config()
             data = self.parse_post()
+            current_site = resolve_site_key(base_config, data.get("site") or None)
+            config = site_config(base_config, current_site)
 
             if path == "/service":
                 service = data.get("service", "")
@@ -4224,9 +4465,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     raise RuntimeError("Unbekannte Aktion.")
 
-                self.redirect(
-                    dashboard_redirect_url(message)
-                )
+                self.redirect(site_url("/", current_site, message=message))
                 return
 
             if path == "/generate-mesh":
@@ -4250,77 +4489,132 @@ class Handler(BaseHTTPRequestHandler):
                     "mesh",
                     "Mesh Report",
                 )
-                self.redirect(f"/preview/{token}")
+                self.redirect(site_url(f"/preview/{token}", current_site))
                 return
 
 
             if path == "/settings":
-                updated = {
-                    "questdb_host": data.get("questdb_host", "").strip(),
-                    "questdb_port": int(data.get("questdb_port", "9000")),
-                    "receiver_name": data.get("receiver_name", "").strip(),
-                    "receiver_id": data.get("receiver_id", "").strip(),
-                    "output_dir": data.get("output_dir", "reports").strip(),
-                    "web_host": data.get("web_host", "127.0.0.1").strip(),
-                    "web_port": int(data.get("web_port", "8080")),
-                    "receiver_script": data.get("receiver_script", "receiver.py").strip(),
-                    "receiver_args": data.get("receiver_args", "").strip(),
-                    "importer_script": data.get("importer_script", "packettap_importer.py").strip(),
-                    "importer_args": data.get("importer_args", "--follow").strip(),
-                    "log_dir": data.get("log_dir", "logs").strip(),
-                    "importer_state": data.get(
-                        "importer_state",
-                        "state/importer.state",
-                    ).strip(),
-                    "receiver_lock": data.get(
-                        "receiver_lock",
-                        "state/receiver.lock",
-                    ).strip(),
-                    "receiver_stop": data.get(
-                        "receiver_stop",
-                        "state/receiver.stop",
-                    ).strip(),
-                    "importer_lock": data.get(
-                        "importer_lock",
-                        "state/importer.lock",
-                    ).strip(),
-                    "importer_stop": data.get(
-                        "importer_stop",
-                        "state/importer.stop",
-                    ).strip(),
-                    "dashboard_refresh_seconds": int(
-                        data.get("dashboard_refresh_seconds", "15")
-                    ),
-                    "auto_start_receiver": (
-                        data.get("auto_start_receiver") == "1"
-                    ),
-                    "auto_start_importer": (
-                        data.get("auto_start_importer") == "1"
-                    ),
-                }
-
                 import shlex
-                updated["receiver_args"] = shlex.split(
-                    updated["receiver_args"],
-                    posix=not sys.platform.startswith("win"),
-                )
-                updated["importer_args"] = shlex.split(
-                    updated["importer_args"],
-                    posix=not sys.platform.startswith("win"),
-                )
+                updated = dict(base_config)
+                updated_sites = {}
+                renamed_keys: dict[str, str] = {}
 
-                if not updated["questdb_host"]:
-                    raise RuntimeError("QuestDB Host darf nicht leer sein.")
-                if not updated["output_dir"]:
-                    raise RuntimeError("Ausgabeordner darf nicht leer sein.")
-
-                save_config(updated)
-                self.send_html(
-                    settings_page(
-                        updated,
-                        "Einstellungen gespeichert.",
+                delete_site = data.get("delete_site", "").strip()
+                if delete_site and delete_site not in base_config["sites"]:
+                    raise RuntimeError("Der zu löschende Standort existiert nicht.")
+                if delete_site and len(base_config["sites"]) <= 1:
+                    raise RuntimeError(
+                        "Der letzte verbleibende Standort kann nicht gelöscht werden."
                     )
+
+                for key, old_profile in base_config["sites"].items():
+                    if key == delete_site:
+                        continue
+
+                    prefix = f"site__{key}__"
+                    requested_key = _site_key(
+                        data.get(prefix + "key", key).strip() or key
+                    )
+                    if requested_key in updated_sites:
+                        raise RuntimeError(
+                            f"Standort-Profil-ID {requested_key!r} ist mehrfach vergeben."
+                        )
+
+                    profile = {
+                        "name": data.get(prefix + "name", old_profile["name"]).strip(),
+                        "collector_type": data.get(prefix + "collector_type", old_profile.get("collector_type", "packettap")).strip(),
+                        "questdb_host": data.get(prefix + "questdb_host", old_profile["questdb_host"]).strip(),
+                        "questdb_port": int(data.get(prefix + "questdb_port", str(old_profile["questdb_port"]))),
+                        "receiver_name": data.get(prefix + "receiver_name", old_profile["receiver_name"]).strip(),
+                        "receiver_id": data.get(prefix + "receiver_id", old_profile["receiver_id"]).strip(),
+                        "max_geo_distance_km": max(
+                            0.0,
+                            float(
+                                data.get(
+                                    prefix + "max_geo_distance_km",
+                                    str(old_profile.get("max_geo_distance_km", 500.0)),
+                                )
+                            ),
+                        ),
+                    }
+                    if not profile["name"] or not profile["questdb_host"]:
+                        raise RuntimeError(
+                            f"Standort {requested_key}: Anzeigename und QuestDB Host sind erforderlich."
+                        )
+
+                    updated_sites[requested_key] = _normalize_site_profile(
+                        requested_key,
+                        profile,
+                    )
+                    renamed_keys[key] = requested_key
+
+                if data.get("new_site_key", "").strip() or data.get("new_site_name", "").strip() or data.get("new_site_questdb_host", "").strip():
+                    new_key = _site_key(data.get("new_site_key", "").strip() or data.get("new_site_name", "").strip())
+                    if new_key in updated_sites:
+                        raise RuntimeError(f"Standort-Profil-ID {new_key!r} existiert bereits.")
+                    new_name = data.get("new_site_name", "").strip()
+                    new_host = data.get("new_site_questdb_host", "").strip()
+                    if not new_name or not new_host:
+                        raise RuntimeError("Für einen neuen Standort sind Anzeigename und QuestDB Host erforderlich.")
+                    updated_sites[new_key] = _normalize_site_profile(new_key, {
+                        "name": new_name,
+                        "collector_type": data.get("new_site_collector_type", "packettap"),
+                        "questdb_host": new_host,
+                        "questdb_port": int(data.get("new_site_questdb_port", "9000")),
+                        "receiver_name": data.get("new_site_receiver_name", "").strip(),
+                        "receiver_id": data.get("new_site_receiver_id", "").strip(),
+                        "max_geo_distance_km": max(
+                            0.0,
+                            float(data.get("new_site_max_geo_distance_km", "500")),
+                        ),
+                    })
+
+                requested_active = _site_key(
+                    data.get("active_site", base_config["active_site"])
                 )
+                active_site = renamed_keys.get(requested_active, requested_active)
+                if active_site not in updated_sites:
+                    active_site = next(iter(updated_sites))
+                updated["sites"] = updated_sites
+                updated["active_site"] = active_site
+                active = updated_sites[active_site]
+                updated["questdb_host"] = active["questdb_host"]
+                updated["questdb_port"] = active["questdb_port"]
+                updated["receiver_name"] = active["receiver_name"]
+                updated["receiver_id"] = active["receiver_id"]
+                updated["output_dir"] = data.get("output_dir", "reports").strip()
+                updated["web_host"] = data.get("web_host", "127.0.0.1").strip()
+                updated["web_port"] = int(data.get("web_port", "8080"))
+                updated["receiver_script"] = data.get("receiver_script", "receiver.py").strip()
+                updated["receiver_args"] = shlex.split(data.get("receiver_args", ""), posix=not sys.platform.startswith("win"))
+                if "--append" not in updated["receiver_args"]:
+                    updated["receiver_args"].append("--append")
+                updated["importer_script"] = data.get("importer_script", "packettap_importer.py").strip()
+                updated["importer_args"] = shlex.split(data.get("importer_args", "--follow"), posix=not sys.platform.startswith("win"))
+                updated["log_dir"] = data.get("log_dir", "logs").strip()
+                updated["importer_state"] = data.get("importer_state", "state/importer.state").strip()
+                updated["receiver_lock"] = data.get("receiver_lock", "state/receiver.lock").strip()
+                updated["receiver_stop"] = data.get("receiver_stop", "state/receiver.stop").strip()
+                updated["importer_lock"] = data.get("importer_lock", "state/importer.lock").strip()
+                updated["importer_stop"] = data.get("importer_stop", "state/importer.stop").strip()
+                updated["dashboard_refresh_seconds"] = int(data.get("dashboard_refresh_seconds", "15"))
+                updated["auto_start_receiver"] = data.get("auto_start_receiver") == "1"
+                updated["auto_start_importer"] = data.get("auto_start_importer") == "1"
+                save_config(updated)
+                shown = dict(updated)
+                mapped_current_site = renamed_keys.get(current_site, current_site)
+                shown["site_key"] = (
+                    mapped_current_site
+                    if mapped_current_site in updated_sites
+                    else active_site
+                )
+                if delete_site:
+                    message = "Standort gelöscht und Einstellungen gespeichert."
+                elif any(old != new for old, new in renamed_keys.items()):
+                    message = "Profil-ID geändert und Einstellungen gespeichert."
+                else:
+                    message = "Einstellungen gespeichert."
+                self.send_html(settings_page(shown, message))
                 return
 
             if path == "/generate":
@@ -4349,7 +4643,7 @@ class Handler(BaseHTTPRequestHandler):
                         + (selected.adv_name or selected.public_key[:8])
                     ),
                 )
-                self.redirect(f"/preview/{token}")
+                self.redirect(site_url(f"/preview/{token}", current_site))
                 return
 
             if path == "/save-neighbor":
@@ -4375,7 +4669,7 @@ class Handler(BaseHTTPRequestHandler):
                         "message": message,
                     }
                 )
-                self.redirect(f"/neighbors?{query_string}")
+                self.redirect(f"/neighbors?site={urllib.parse.quote(current_site)}&{query_string}")
                 return
 
             if path == "/save-preview":
@@ -4425,7 +4719,7 @@ class Handler(BaseHTTPRequestHandler):
                         "error": "1",
                     }
                 )
-                self.redirect(f"/neighbors?{query_string}")
+                self.redirect(f"/neighbors?site={urllib.parse.quote(current_site)}&{query_string}")
             elif path == "/save-preview":
                 token = ""
                 try:

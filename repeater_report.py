@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap - Repeater Report v0.50
+MeshCore PacketTap - Repeater Report v0.51
 =========================================
 
 Direkt auf das dokumentierte QuestDB-Datenmodell von meshcore-packettap
@@ -1528,7 +1528,17 @@ def render_html(
     neighbors_gt3: list[NeighborInfo],
     ranking: list[tuple[str, int]],
     contacts: list[Contact],
+    site_name: str | None = None,
 ) -> str:
+
+    observer_display_name = text_value(site_name) or metrics.observer_location
+    receiver_detail = (
+        f"Receiver: {metrics.observer_location} · "
+        f"Public Key: {short_key(metrics.receiver_id, 8, 8)}"
+        if text_value(site_name)
+        and norm(site_name) != norm(metrics.observer_location)
+        else f"Public Key: {short_key(metrics.receiver_id, 8, 8)}"
+    )
 
     period_text = (
         f"{format_period_de(metrics.period_from)} – "
@@ -2496,9 +2506,9 @@ summary {{
   <div class="report-context-grid">
     <div class="report-context-card">
       <div class="report-context-label">Beobachtungsstandort</div>
-      <div class="report-context-value">{esc(metrics.observer_location)}</div>
-      <div class="report-context-sub mono">
-        Public Key: {esc(short_key(metrics.receiver_id, 8, 8))}
+      <div class="report-context-value">{esc(observer_display_name)}</div>
+      <div class="report-context-sub">
+        {esc(receiver_detail)}
       </div>
     </div>
     <div class="report-context-card">

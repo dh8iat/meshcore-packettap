@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap - Observed Mesh Report v0.37
+MeshCore PacketTap - Observed Mesh Report v0.40
 ==============================================
 
 Standortbezogener Mesh-Report auf Basis des bestehenden meshcore-packettap
@@ -26,7 +26,7 @@ from typing import Any
 
 import repeater_report as rr
 
-APP_VERSION = "0.37"
+APP_VERSION = "0.40"
 
 
 @dataclass
@@ -214,13 +214,21 @@ def load_mesh_rx(
     return db.rows(sql)
 
 
-def load_geo_repeaters(db: rr.QuestDB) -> list[GeoRepeater]:
+def load_geo_contacts(db: rr.QuestDB) -> dict[str, GeoRepeater]:
+    """Load the latest valid coordinates for all contacts, regardless of role."""
     available = db.table_columns("mc_contacts")
-    if "adv_lat" not in available or "adv_lon" not in available:
-        return []
+    required = {"ts", "public_key", "adv_lat", "adv_lon"}
+    missing = required - available
+    if missing:
+        return {}
 
-    rows = db.rows("""
-        SELECT ts, public_key, adv_name, node_role, adv_lat, adv_lon
+    cols = ["ts", "public_key"]
+    if "adv_name" in available:
+        cols.append("adv_name")
+    cols.extend(["adv_lat", "adv_lon"])
+
+    rows = db.rows(f"""
+        SELECT {', '.join(cols)}
         FROM mc_contacts
         WHERE public_key IS NOT NULL
         ORDER BY ts
@@ -231,6 +239,96 @@ def load_geo_repeaters(db: rr.QuestDB) -> list[GeoRepeater]:
         key = rr.norm(row.get("public_key"))
         if not rr.is_full_public_key(key):
             continue
+
+        lat = to_float(row.get("adv_lat"))
+        lon = to_float(row.get("adv_lon"))
+        if lat is None or lon is None:
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+            continue
+
+        latest[key] = GeoRepeater(
+            public_key=key,
+            name=rr.text_value(row.get("adv_name")) or "–",
+            lat=lat,
+            lon=lon,
+        )
+
+    return latest
+
+
+def observer_geo_from_contacts(
+    geo_contacts: dict[str, GeoRepeater],
+    observer_id: str,
+) -> GeoRepeater | None:
+    """Resolve the observation site by its configured/detected public key."""
+    key = rr.norm(observer_id)
+    if not rr.is_full_public_key(key):
+        return None
+    return geo_contacts.get(key)
+
+
+def filter_geo_by_observer_distance(
+    geo_items: list[GeoRepeater],
+    observer_geo: GeoRepeater | None,
+    max_distance_km: float | None,
+) -> tuple[list[GeoRepeater], list[GeoRepeater]]:
+    """Filter implausible map positions without modifying QuestDB raw data."""
+    if observer_geo is None or max_distance_km is None:
+        return list(geo_items), []
+
+    try:
+        limit = float(max_distance_km)
+    except (TypeError, ValueError):
+        return list(geo_items), []
+
+    if limit <= 0:
+        return list(geo_items), []
+
+    accepted: list[GeoRepeater] = []
+    rejected: list[GeoRepeater] = []
+
+    for item in geo_items:
+        if item.public_key == observer_geo.public_key:
+            accepted.append(item)
+            continue
+
+        distance = haversine_km(
+            observer_geo.lat,
+            observer_geo.lon,
+            item.lat,
+            item.lon,
+        )
+        (accepted if distance <= limit else rejected).append(item)
+
+    return accepted, rejected
+
+
+def load_geo_repeaters(db: rr.QuestDB) -> list[GeoRepeater]:
+    """Load latest coordinates only for contacts whose current role is repeater."""
+    available = db.table_columns("mc_contacts")
+    required = {"ts", "public_key", "node_role", "adv_lat", "adv_lon"}
+    missing = required - available
+    if missing:
+        return []
+
+    rows = db.rows("""
+        SELECT ts, public_key, adv_name, node_role, adv_lat, adv_lon
+        FROM mc_contacts
+        WHERE public_key IS NOT NULL
+        ORDER BY ts
+    """)
+
+    latest_rows: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = rr.norm(row.get("public_key"))
+        if rr.is_full_public_key(key):
+            latest_rows[key] = row
+
+    result: list[GeoRepeater] = []
+    for key, row in latest_rows.items():
         if rr.norm(row.get("node_role")) != "repeater":
             continue
         lat = to_float(row.get("adv_lat"))
@@ -241,13 +339,16 @@ def load_geo_repeaters(db: rr.QuestDB) -> list[GeoRepeater]:
             continue
         if abs(lat) < 1e-6 and abs(lon) < 1e-6:
             continue
-        latest[key] = GeoRepeater(
-            public_key=key,
-            name=rr.text_value(row.get("adv_name")) or "–",
-            lat=lat,
-            lon=lon,
+        result.append(
+            GeoRepeater(
+                public_key=key,
+                name=rr.text_value(row.get("adv_name")) or "–",
+                lat=lat,
+                lon=lon,
+            )
         )
-    return list(latest.values())
+
+    return result
 
 
 def determine_observer(
@@ -494,23 +595,43 @@ def render_mesh_map(
     repeaters: list[GeoRepeater],
     observer_id: str,
     extent: MeshExtent,
+    observer_geo: GeoRepeater | None = None,
 ) -> str:
     """Render a Leaflet map with an online OpenStreetMap background."""
-    if not repeaters:
+    if not repeaters and observer_geo is None:
         return (
             "<div class='map-empty'>Keine Positionsdaten für die im "
-            "Beobachtungszeitraum erkannten Repeater verfügbar.</div>"
+            "Beobachtungszeitraum erkannten Repeater oder den "
+            "Beobachtungsstandort verfügbar.</div>"
         )
 
+    observer_key = rr.norm(observer_id)
     marker_data = []
+    observer_already_present = False
+
     for item in repeaters:
+        is_observer = observer_key == item.public_key
+        observer_already_present = observer_already_present or is_observer
         marker_data.append(
             {
                 "key": item.public_key,
                 "name": item.name,
                 "lat": item.lat,
                 "lon": item.lon,
-                "observer": rr.norm(observer_id) == item.public_key,
+                "observer": is_observer,
+                "repeater": True,
+            }
+        )
+
+    if observer_geo is not None and not observer_already_present:
+        marker_data.append(
+            {
+                "key": observer_geo.public_key,
+                "name": observer_geo.name,
+                "lat": observer_geo.lat,
+                "lon": observer_geo.lon,
+                "observer": True,
+                "repeater": False,
             }
         )
 
@@ -616,11 +737,13 @@ def render_mesh_map(
           {{sticky: true}}
         );
 
-        searchableMarkers.push({{
-          item: item,
-          marker: marker,
-          normalStyle: normalStyle
-        }});
+        if (item.repeater) {{
+          searchableMarkers.push({{
+            item: item,
+            marker: marker,
+            normalStyle: normalStyle
+          }});
+        }}
       }});
 
       function clearHighlight() {{
@@ -867,7 +990,17 @@ def render_html(
     direct_neighbors: list[DirectNeighbor],
     extent: MeshExtent,
     observed_geo: list[GeoRepeater],
+    observer_geo: GeoRepeater | None = None,
+    site_name: str | None = None,
 ) -> str:
+    observer_display_name = rr.text_value(site_name) or observer_name
+    receiver_detail = (
+        f"Receiver: {observer_name} · Public Key: {short_receiver_key(observer_id)}"
+        if rr.text_value(site_name)
+        and rr.norm(site_name) != rr.norm(observer_name)
+        else f"Public Key: {short_receiver_key(observer_id)}"
+    )
+
     load_kind, load_label = load_assessment(load.avg_packets_per_hour)
     total_hours = max(1, load.hours_good + load.hours_loaded + load.hours_overloaded)
     overloaded_pct = 100.0 * load.hours_overloaded / total_hours
@@ -1074,8 +1207,8 @@ table {{width:100%;border-collapse:collapse;margin:10px 0 18px}} th,td {{border-
 <div class="report-context-grid">
   <div class="report-context-card">
     <div class="report-context-label">Beobachtungsstandort</div>
-    <div class="report-context-value">{esc(observer_name)}</div>
-    <div class="report-context-sub mono">Public Key: {esc(short_receiver_key(observer_id))}</div>
+    <div class="report-context-value">{esc(observer_display_name)}</div>
+    <div class="report-context-sub">{esc(receiver_detail)}</div>
   </div>
   <div class="report-context-card">
     <div class="report-context-label">Beobachtungszeitraum</div>
@@ -1102,7 +1235,7 @@ W: <strong>{esc(geo_name(extent.west))}</strong> {esc(geo_coord(extent.west))}<b
 O: <strong>{esc(geo_name(extent.east))}</strong> {esc(geo_coord(extent.east))}
 </div></div>
 </div>
-<h3 class="map-chapter">Karte des beobachteten Mesh</h3>{render_mesh_map(observed_geo, observer_id, extent)}
+<h3 class="map-chapter">Karte des beobachteten Mesh</h3>{render_mesh_map(observed_geo, observer_id, extent, observer_geo)}
 </section>
 <section class="print-chapter"><h2>Netzlast am Beobachtungsstandort</h2><p class="section-intro">Die Bewertung basiert auf der Anzahl der am Receiver beobachteten Pakete pro Stunde. Unter 1.000 Paketen/h gilt das Netz erfahrungsgemäß als gut nutzbar, 1.000–1.500 Pakete/h als belastet und über 1.500 Pakete/h als überlastet.</p>
 <div class="kpi-grid">
@@ -1129,13 +1262,19 @@ O: <strong>{esc(geo_name(extent.east))}</strong> {esc(geo_coord(extent.east))}
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="MeshCore PacketTap Observed Mesh Report v0.37")
+    p = argparse.ArgumentParser(description="MeshCore PacketTap Observed Mesh Report v0.40")
     p.add_argument("--questdb-host", default=rr.DEFAULT_QUESTDB_HOST)
     p.add_argument("--questdb-port", type=int, default=rr.DEFAULT_QUESTDB_PORT)
     p.add_argument("--from", dest="period_from", type=rr.validate_iso_time, required=True)
     p.add_argument("--to", dest="period_to", type=rr.validate_iso_time, required=True)
     p.add_argument("--receiver-id", default=None)
     p.add_argument("--receiver-name", default=None)
+    p.add_argument(
+        "--max-geo-distance-km",
+        type=float,
+        default=500.0,
+        help="Maximale plausible Advert-Entfernung zum Beobachtungsstandort; <=0 deaktiviert den Filter.",
+    )
     p.add_argument("--output", default="mesh_report.html")
     return p.parse_args()
 
@@ -1160,6 +1299,13 @@ def main() -> int:
 
         print("[MESH] Lade bekannte Repeater-Positionen ...")
         geo_repeaters = load_geo_repeaters(db)
+        geo_contacts = load_geo_contacts(db)
+        observer_geo = observer_geo_from_contacts(geo_contacts, observer_id)
+        geo_repeaters, rejected_geo = filter_geo_by_observer_distance(
+            geo_repeaters,
+            observer_geo,
+            args.max_geo_distance_km,
+        )
         extent, observed_geo = analyze_extent(repeaters, geo_repeaters)
         print(
             f"[MESH] {extent.repeater_count} Repeater im beobachteten Mesh, "
@@ -1177,7 +1323,7 @@ def main() -> int:
                 args.period_from, args.period_to,
                 load, hour_values, routing, repeaters,
                 far_packets, max_pos, far_repeaters, pos_counts,
-                direct_neighbors, extent, observed_geo,
+                direct_neighbors, extent, observed_geo, observer_geo,
             ),
             encoding="utf-8",
         )

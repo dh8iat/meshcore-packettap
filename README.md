@@ -7,9 +7,25 @@ Für die Datenerfassung stehen aktuell zwei Wege zur Verfügung:
 1. **PacketTap-Receiver** mit angepasster PacketTap-Firmware, `receiver.py` und `packettap_importer.py`.
 2. **MeshCore TCP Companion** mit Standard-MeshCore-Companion-Firmware und direkter Erfassung über `mc_rx_analyzer.py`.
 
-Beide Wege erzeugen eine für die aktuellen Mesh-, Repeater- und Nachbar-Auswertungen kompatible QuestDB-Datenbasis. PacketTap-spezifische Capture-Metadaten stehen beim TCP-Companion jedoch nicht vollständig zur Verfügung.
+Beide Wege erzeugen eine für Mesh-, Repeater- und Nachbar-Auswertungen kompatible QuestDB-Datenbasis. Die Weboberfläche unterstützt mehrere umschaltbare Beobachtungsstandorte.
 
-Die Weboberfläche umfasst aktuell die Bereiche **Übersicht**, **Mesh**, **Repeater**, **Nachbarn** und **Einstellungen**. Reports werden zunächst als Vorschau erzeugt und nur dauerhaft gespeichert, wenn dies ausdrücklich ausgewählt wird.
+## Aktueller Stand
+
+Der aktuelle Entwicklungsstand umfasst insbesondere:
+
+- zuverlässige PacketTap-Erfassung und QuestDB-Import
+- direkte Erfassung über einen Standard-MeshCore-TCP-Companion
+- mehrere umschaltbare Standortprofile
+- editierbare Profil-IDs und Löschen von Standortprofilen
+- Anzeigename des Standorts als primäre Bezeichnung in Oberfläche und Reports
+- Receivername und Public Key als dezente technische Zusatzinformation
+- standortbezogene Mesh-Auswertung
+- detaillierte Repeater-Auswertung
+- Analyse direkter Nachbarn
+- interaktive Kartenansichten
+- konfigurierbaren Geo-Plausibilitätsfilter gegen fehlerhafte Advert-Koordinaten
+- Erhalt der unveränderten Rohkoordinaten in QuestDB
+- Report-Vorschau und gezieltes dauerhaftes Speichern als PDF
 
 ## Erfassungswege
 
@@ -32,8 +48,6 @@ packettap_importer.py
      QuestDB
 ```
 
-Dieser Weg liefert zusätzlich PacketTap-spezifische Capture-Metadaten wie beispielsweise Capture-Sequenz, CRC-Status und hochaufgelöste Empfangszeitstempel.
-
 ### MeshCore TCP Companion
 
 ```text
@@ -51,55 +65,21 @@ meshcore_decoder.py
      QuestDB
 ```
 
-Der Companion-Weg verwendet `RX_LOG_DATA` und übernimmt unter anderem RSSI, SNR, Receiver-Identität und Companion-Informationen direkt aus der TCP-Verbindung. Eine spezielle PacketTap-Firmware ist für diesen Erfassungsweg nicht erforderlich.
+Der Companion-Weg verwendet `RX_LOG_DATA` und übernimmt unter anderem RSSI, SNR, Receiver-Identität und Companion-Informationen direkt aus der TCP-Verbindung.
 
-Der eigene Beobachtungsstandort wird aus den per `APPSTART` gelieferten Informationen einschließlich `adv_lat` und `adv_lon` in `mc_contacts` eingetragen. Dadurch kann auch ein Companion-basierter Beobachtungsstandort in Karten und Reports geografisch aufgelöst werden.
-
-## Auswertung
-
-```text
-QuestDB
-   |
-   +--> Repeater-Auswertung
-   +--> Mesh-Auswertung
-   +--> Nachbar-Auswertung
-   |
-   v
-report_server.py
-   |
-   +--> Browser-Vorschau
-   +--> PDF-Report
-```
-
-## Voraussetzungen
-
-Benötigt werden:
-
-- Python 3
-- eine erreichbare QuestDB mit einer von PacketTap oder dem Companion-Collector erzeugten Datenbasis
-- `report_server.py`, `repeater_report.py` und `mesh_report.py` im selben Verzeichnis
-- eine lokale `report_config.json`
-- für das Speichern als PDF: Microsoft Edge oder Google Chrome
-
-Für den PacketTap-Erfassungsweg kommen zusätzlich `receiver.py` und `packettap_importer.py` zum Einsatz. Für den TCP-Companion-Erfassungsweg werden `mc_rx_analyzer.py`, `meshcore_decoder.py`, `mc_writer.py` und `mc_db.py` benötigt.
-
-Die Kartenansichten verwenden Leaflet und eine Online-Kartenquelle. Für die Darstellung der Hintergrundkarte muss beim Aufruf des Reports bzw. der Weboberfläche eine Internetverbindung vorhanden sein.
+Der eigene Beobachtungsstandort wird aus den per `APPSTART` gelieferten Informationen einschließlich `adv_lat` und `adv_lon` in `mc_contacts` eingetragen. Dadurch kann auch ein Companion-basierter Standort in Karten und Reports geografisch aufgelöst werden.
 
 ## Hauptkomponenten
 
 ### `receiver.py`
 
-Der Receiver nimmt die PacketTap-TCP-Verbindung entgegen und verarbeitet PKTH- und PKTP-Frames.
-
-Für den Dauerbetrieb sollte er mit `--append` gestartet werden:
+Nimmt die PacketTap-TCP-Verbindung entgegen und verarbeitet PKTH- und PKTP-Frames.
 
 ```powershell
 python receiver.py --append
 ```
 
-Damit werden bestehende Capture-Dateien fortgesetzt und nicht überschrieben.
-
-Der Receiver unterstützt einen Single-Instance-Schutz und einen kontrollierten externen Stop:
+Single-Instance-Schutz und kontrollierter Stop:
 
 ```text
 state/receiver.lock
@@ -108,34 +88,23 @@ state/receiver.stop
 
 ### `packettap_importer.py`
 
-Der Importer liest `packettap_capture.log`, dekodiert die enthaltenen MeshCore-Pakete und schreibt die Daten nach QuestDB.
-
-Für den Dauerbetrieb:
+Liest `packettap_capture.log`, dekodiert MeshCore-Pakete und schreibt die Daten nach QuestDB.
 
 ```powershell
 python packettap_importer.py --follow
 ```
 
-Der Importer verwendet einen persistenten Checkpoint:
+Persistenter Checkpoint und Prozesssteuerung:
 
 ```text
 state/importer.state
-```
-
-Dadurch kann er nach einem Neustart am zuletzt bestätigten Stand fortsetzen.
-
-Zusätzlich werden verwendet:
-
-```text
 state/importer.lock
 state/importer.stop
 ```
 
 ### `mc_rx_analyzer.py`
 
-Der Companion-Collector verbindet sich per TCP mit einem Standard-MeshCore-Companion und verarbeitet dessen `RX_LOG_DATA`-Events direkt.
-
-Er verwendet den gemeinsamen `meshcore_decoder.py` und schreibt unter anderem folgende Tabellen:
+Der Companion-Collector verarbeitet `RX_LOG_DATA` direkt und schreibt unter anderem:
 
 ```text
 mc_rx
@@ -146,58 +115,29 @@ mc_companion_info
 
 Wesentliche Eigenschaften:
 
-- direkte TCP-Verbindung zum MeshCore-Companion
-- Übernahme von RSSI und SNR aus `RX_LOG_DATA`
+- RSSI und SNR aus `RX_LOG_DATA`
 - Receiver-Identität in `mc_rx`
 - passive ADVERT-Kontakte in `mc_contacts`
-- historische ADVERT- und DISCOVER_RESP-Beobachtungen in `mc_contact_observations`
-- Companion-Informationen einschließlich Firmware, Build und Noise Floor in `mc_companion_info`
-- eigene Standortposition aus `APPSTART` in `mc_contacts`
-- automatischer Reconnect bei Verbindungsverlust
+- ADVERT- und DISCOVER_RESP-Historie in `mc_contact_observations`
+- Companion-Informationen einschließlich Firmware, Build und Noise Floor
+- eigene Standortposition aus `APPSTART`
+- automatischer Reconnect
 - RX-Watchdog
 - sauberer Shutdown über `Ctrl+C` und systemd `SIGTERM`
 
-Für den Linux-Dauerbetrieb kann `mc_rx_analyzer.py` beispielsweise über systemd gestartet werden.
-
 ### `repeater_report.py`
 
-Erzeugt die Auswertung eines ausgewählten Repeaters für einen definierten Beobachtungszeitraum.
+Erzeugt die Auswertung eines ausgewählten Repeaters. Der Beobachtungsstandort wird mit dem Anzeigenamen des Standortprofils dargestellt; Receivername und Public Key erscheinen als technische Zusatzinformation.
 
-Der Report wertet unter anderem aus:
-
-- Kennzahlen des Beobachtungsstandorts
-- Kennzahlen des untersuchten Repeaters
-- Routing-Verhalten
-- Advert-Verhalten
-- Repeater-Nachbarn
-- Unscoped-Nachbarn über größere Hop-Distanzen
-- Path-IDs und deren Zuordnung zu bekannten Repeatern
-- mehrdeutige Path-IDs ohne fälschliche eindeutige Public-Key-Zuordnung
-- Methodik der Auswertung
-
-Die Zuordnung von Path-IDs berücksichtigt, dass verkürzte Hashes mehrdeutig sein können. Mehrdeutige Kandidaten werden entsprechend als solche dargestellt.
-
-`mc_contact_observations` kann je nach Entstehungsweg eine designierte Zeitspalte `ts` oder `timestamp` besitzen. Der Repeater-Report unterstützt beide Varianten.
+`mc_contact_observations` kann je nach Erfassungsweg eine designierte Zeitspalte `ts` oder `timestamp` besitzen. Beide Varianten werden unterstützt.
 
 ### `mesh_report.py`
 
-Erzeugt einen standortbezogenen Report über das Mesh, das der konfigurierte Receiver im gewählten Zeitraum tatsächlich beobachtet hat.
+Erzeugt einen standortbezogenen Report über das tatsächlich beobachtete Mesh. Dazu gehören Last, Routing-Verteilung, Repeater-Aktivität, Nachbarn und geografische Ausdehnung.
 
-Die Auswertung umfasst unter anderem:
-
-- Gesamtlast und Paketrate
-- Routing-Verteilung
-- Aktivität der beobachteten Repeater
-- direkte Nachbarn
-- Unscoped-Repeater in größerer Hop-Distanz
-- geografische Ausdehnung des beobachteten Mesh
-- Kartenansicht der Repeater mit bekannten Koordinaten
-
-Die Repeater-Koordinaten werden aus `mc_contacts` verwendet, sofern dort gültige Positionsdaten vorliegen.
+Für Karten werden nur plausible Koordinaten verwendet. Die Rohkoordinaten in QuestDB bleiben unverändert.
 
 ### `report_server.py`
-
-Die lokale Weboberfläche ist die PacketTap-Kommandozentrale.
 
 Start:
 
@@ -205,106 +145,77 @@ Start:
 python report_server.py
 ```
 
-Standardmäßig ist sie anschließend erreichbar unter:
+Standard:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-Die Navigation besteht aus:
+Navigation:
 
 ```text
 Übersicht | Mesh | Repeater | Nachbarn | Einstellungen
 ```
 
-## Weboberfläche
+## Standortprofile
 
-### Übersicht
+Über die Standortauswahl im Kopfbereich kann zwischen mehreren Beobachtungsstandorten gewechselt werden.
 
-Die Übersicht zeigt den Betriebszustand der PacketTap-Verarbeitung. Dazu gehören insbesondere:
+Ein Standortprofil enthält unter anderem:
 
-- QuestDB-Verbindungsstatus
-- Status von Receiver und Importer
-- Starten, geordnetes Stoppen und Neustarten der Dienste
-- Importer-Checkpoint
-- Logausgaben
+- Profil-ID
+- Anzeigename
+- Collector-Typ
+- QuestDB Host und Port
+- Receivername
+- Receiver Public Key / ID
+- maximale Kartenentfernung
 
-Receiver und Importer werden dabei über ihre Lock- und Stop-Dateien gesteuert. Die Weboberfläche verwendet keinen harten Prozessabbruch.
+Die **Profil-ID ist editierbar**. Standortprofile können gelöscht werden; der letzte verbleibende Standort ist gegen Löschen geschützt.
 
-### Mesh
+Der Anzeigename wird in der Weboberfläche und in den Reports als primäre Standortbezeichnung verwendet.
 
-Die Mesh-Seite erzeugt einen standortbezogenen Mesh-Report für einen frei wählbaren Zeitraum.
+## Mesh-Karte
 
-Als Vorauswahl wird ein Zeitraum von sieben Tagen verwendet.
+Die Mesh-Seite enthält neben der Report-Erzeugung eine interaktive Karte des beobachteten Mesh der letzten 28 Tage.
 
-Unterhalb der Report-Erzeugung wird zusätzlich eine interaktive **Karte des beobachteten Mesh der letzten 28 Tage** angezeigt. Sie enthält die beobachteten Repeater, soweit deren Koordinaten bekannt sind.
+Sie zeigt:
 
-Die Karte bietet außerdem eine Repeatersuche, über die ein Repeater gesucht und auf der Karte hervorgehoben werden kann.
+- beobachtete Repeater
+- Repeater mit plausiblen Koordinaten
+- wegen unplausibler Position ausgefilterte Einträge
+- den konfigurierten maximalen Kartenradius
 
-### Repeater
+Eine Repeatersuche erlaubt das gezielte Hervorheben eines Repeaters.
 
-Auf der Repeater-Seite kann ein einzelner Repeater ausgewählt und für einen bestimmten Zeitraum untersucht werden.
+## Geo-Plausibilitätsfilter
 
-Die Auswahl kann über den Repeaternamen bzw. einen eindeutigen 2-Byte-Hash erfolgen. Bekannte Repeater werden aus QuestDB geladen.
-
-Auch hier ist der Zeitraum standardmäßig auf sieben Tage vorbelegt und kann vor der Report-Erzeugung geändert werden.
-
-### Nachbarn
-
-Die Nachbar-Seite untersucht **direkte Nachbarn des konfigurierten Beobachtungsstandorts**.
-
-Für einen ausgewählten direkten Nachbarn werden unter anderem dargestellt:
-
-- grundlegende Kennzahlen
-- Rang unter den direkten Nachbarn
-- Entfernung zum Beobachtungsstandort
-- Position und Kartenansicht mit Verbindung zwischen Receiver und Nachbar
-- zeitlicher Verlauf von RSSI
-- zeitlicher Verlauf von SNR
-- letzte direkte Adverts
-- letzter beobachteter Flood-Advert
-
-Die Position des Nachbarn wird aus den in `mc_contacts` gespeicherten Kontaktdaten verwendet.
-
-Die RSSI- und SNR-Verläufe werden bewusst getrennt dargestellt, damit beide Messgrößen unabhängig voneinander beurteilt werden können.
-
-### Einstellungen
-
-Die Einstellungen werden in folgender Datei gespeichert:
+Fehlerhafte Koordinaten in Repeater-Adverts werden bewusst **nicht aus QuestDB gelöscht**. Stattdessen werden sie nur für Karten und geografische Auswertungen gefiltert.
 
 ```text
-report_config.json
+Advert-Koordinaten
+        +
+Position des Beobachtungsstandorts
+        +
+Entfernung <= max_geo_distance_km
+        |
+        v
+plausible Kartenposition
 ```
 
-Über die Weboberfläche können unter anderem konfiguriert werden:
+Standard:
 
-- QuestDB Host und Port
-- Name und ID des Beobachtungsstandorts
-- Ausgabeordner
-- Web Host und Web Port
-- Receiver- und Importer-Skripte
-- Startargumente
-- Lock- und Stop-Dateien
-- Logverzeichnis
-- Importer-Checkpoint
-- automatischer Start von Receiver und Importer
-- Aktualisierungsintervall der Übersicht
+```text
+max_geo_distance_km = 500
+```
 
-Änderungen an Web Host oder Web Port werden erst nach einem Neustart des Report-Servers aktiv.
+Der Wert wird pro Standortprofil gespeichert und kann unter **Einstellungen** geändert werden. `0` deaktiviert den Distanzfilter.
 
-## Report-Vorschau und PDF
+Damit bleiben die empfangenen Rohdaten vollständig nachvollziehbar, während falsche Positionsangaben die Mesh- und Nachbarkarten nicht über tausende Kilometer verzerren.
 
-Repeater- und Mesh-Reports werden nach der Erzeugung unmittelbar als Vorschau im Browser geöffnet. Dabei bleibt die PacketTap-Navigation erhalten, sodass direkt wieder zu Übersicht, Mesh, Repeater, Nachbarn oder Einstellungen gewechselt werden kann.
+Auch bei der Nachbar-Auswertung wird eine Position außerhalb des eingestellten Radius nicht für Entfernung oder Verbindungslinie verwendet.
 
-Die Vorschau ist zunächst temporär. Ein Report wird nicht automatisch dauerhaft im Ausgabeordner abgelegt.
-
-Über **Speichern** kann der Report als PDF dauerhaft gespeichert werden.
-
-Für die PDF-Erzeugung sucht PacketTap lokal nach einer geeigneten Installation von Microsoft Edge oder Google Chrome und verwendet den Browser im Headless-Modus.
-
-Die Nachbar-Auswertung kann ebenfalls als PDF gespeichert werden.
-
-## Konfiguration
+## Einstellungen
 
 Die lokale Konfiguration liegt in:
 
@@ -312,115 +223,75 @@ Die lokale Konfiguration liegt in:
 report_config.json
 ```
 
-Diese Datei ist standortspezifisch und sollte nicht ins Repository eingecheckt werden.
+Sie ist installationsspezifisch und sollte nicht ins Repository eingecheckt werden.
 
-Als Vorlage kann eine Datei
-
-```text
-report_config.example.json
-```
-
-verwendet werden.
-
-Unter Windows kann sie beispielsweise kopiert werden mit:
-
-```powershell
-Copy-Item report_config.example.json report_config.json
-```
-
-Anschließend werden die lokalen Werte angepasst oder über **Einstellungen** in der Weboberfläche bearbeitet.
-
-Eine typische Konfiguration enthält unter anderem:
+Eine Mehrstandort-Konfiguration enthält konzeptionell beispielsweise:
 
 ```json
 {
-  "questdb_host": "192.168.1.200",
-  "questdb_port": 9000,
-  "receiver_name": "ABC Repeater",
-  "receiver_id": "",
-  "output_dir": "reports",
-  "web_host": "127.0.0.1",
-  "web_port": 8080,
-  "receiver_script": "receiver.py",
-  "receiver_args": ["--append"],
-  "importer_script": "packettap_importer.py",
-  "importer_args": ["--follow"],
-  "log_dir": "logs",
-  "importer_state": "state/importer.state",
-  "receiver_lock": "state/receiver.lock",
-  "receiver_stop": "state/receiver.stop",
-  "importer_lock": "state/importer.lock",
-  "importer_stop": "state/importer.stop",
-  "dashboard_refresh_seconds": 15,
-  "auto_start_receiver": true,
-  "auto_start_importer": true
+  "active_site": "hornisgrinde",
+  "sites": {
+    "hornisgrinde": {
+      "name": "Hornisgrinde",
+      "collector_type": "companion",
+      "questdb_host": "127.0.0.1",
+      "questdb_port": 9000,
+      "receiver_name": "DK0A",
+      "receiver_id": "<public-key>",
+      "max_geo_distance_km": 500
+    },
+    "stutensee": {
+      "name": "Stutensee - Spoeck",
+      "collector_type": "packettap",
+      "questdb_host": "127.0.0.1",
+      "questdb_port": 9000,
+      "receiver_name": "Stutensee - Spoeck",
+      "receiver_id": "<public-key>",
+      "max_geo_distance_km": 500
+    }
+  }
 }
 ```
 
-Die konkreten Werte für QuestDB und Beobachtungsstandort müssen an die jeweilige Installation angepasst werden.
+Weitere globale Einstellungen wie Ausgabeordner, Web Host/Port, Skripte, Startargumente, Logs, Locks und Checkpoints bleiben Teil der Konfiguration.
 
-## Verzeichnisse
+## Report-Vorschau und PDF
+
+Mesh- und Repeater-Reports werden zunächst als Browser-Vorschau geöffnet. Die Navigation bleibt erhalten.
+
+Über **Speichern** kann ein Report dauerhaft als PDF abgelegt werden. Die Nachbar-Auswertung kann ebenfalls als PDF gespeichert werden.
+
+Für die PDF-Erzeugung wird lokal Microsoft Edge oder Google Chrome im Headless-Modus verwendet.
+
+## Datenmodell-Kompatibilität
+
+Für die aktuellen Reports werden von beiden Erfassungswegen kompatibel befüllt:
 
 ```text
-reports/                 dauerhaft gespeicherte PDF-Reports
-logs/                    Logs der von der Weboberfläche gestarteten Prozesse
-state/                   Lock-, Stop- und Checkpoint-Dateien
-state/report_preview/    temporäre Report-Vorschauen
-docs/                    technische Dokumentation
-map/                     lokale Karten-/Leaflet-Ressourcen, soweit vorhanden
+mc_rx
+mc_contacts
+mc_contact_observations
+mc_companion_info
 ```
 
-Temporäre Report-Vorschauen sind nicht als dauerhaftes Report-Archiv gedacht.
+PacketTap-spezifische Felder wie `capture_sequence`, `crc_ok`, `received_unix_ns`, `packettap_version` oder `packettap_flags` stehen beim TCP-Companion nicht zwingend zur Verfügung.
 
 ## Sicheres Stoppen
 
-### PacketTap Receiver und Importer
-
-Receiver und Importer sollten nicht hart beendet werden.
-
-Manuell kann ein geordneter Stop über die jeweilige Stop-Datei ausgelöst werden:
+PacketTap Receiver und Importer sollten geordnet beendet werden:
 
 ```powershell
 New-Item -ItemType File state\receiver.stop
 New-Item -ItemType File state\importer.stop
 ```
 
-Die laufenden Prozesse erkennen die Datei selbst und durchlaufen ihren regulären Shutdown.
-
-Beim Importer ist dies besonders wichtig, da vor dem Prozessende ausstehende QuestDB-Schreibvorgänge abgeschlossen und der Checkpoint aktualisiert werden.
-
-### TCP Companion Collector
-
-`mc_rx_analyzer.py` verarbeitet `Ctrl+C` sowie systemd `SIGTERM` über einen geordneten Shutdown-Pfad. Dabei wird die TCP-Verbindung geschlossen und der QuestDB-Writer sauber beendet.
-
-## Doppelstarts
-
-Receiver und Importer besitzen einen Betriebssystem-Dateilock:
-
-- Windows: `msvcrt.locking()`
-- Linux: `fcntl.flock()`
-
-Eine zweite Instanz desselben Dienstes wird dadurch abgewiesen.
-
-Beim Companion-Collector sollte im Dauerbetrieb ebenfalls sichergestellt werden, dass nur eine Instanz auf denselben Companion zugreift, beispielsweise über systemd.
+`mc_rx_analyzer.py` verarbeitet `Ctrl+C` und systemd `SIGTERM` über einen geordneten Shutdown-Pfad.
 
 ## Betrieb im lokalen Netzwerk
 
-Standardmäßig bindet sich die Weboberfläche an:
+Standardmäßig bindet sich die Weboberfläche an `127.0.0.1:8080`. Für den Zugriff im lokalen Netzwerk kann `web_host` beispielsweise auf `0.0.0.0` gesetzt werden.
 
-```text
-127.0.0.1:8080
-```
-
-Damit ist sie nur vom lokalen Rechner erreichbar.
-
-Soll die Oberfläche beispielsweise unter Linux im lokalen Netzwerk erreichbar sein, kann `web_host` entsprechend angepasst werden, zum Beispiel:
-
-```json
-"web_host": "0.0.0.0"
-```
-
-Dabei ist zu beachten, dass die Weboberfläche Steuerfunktionen für Receiver und Importer bereitstellt. Der Netzwerkzugriff sollte deshalb nur in einer vertrauenswürdigen Umgebung freigegeben werden.
+Da die Weboberfläche Steuerfunktionen bereitstellt, sollte der Netzwerkzugriff nur in einer vertrauenswürdigen Umgebung freigegeben werden.
 
 ## Getestete Erfassungswege
 
@@ -438,40 +309,11 @@ Dabei ist zu beachten, dass die Weboberfläche Steuerfunktionen für Receiver un
 - direkte TCP-Erfassung mit `mc_rx_analyzer.py`
 - Linux/systemd getestet
 - RSSI/SNR erfolgreich übernommen
-- passive ADVERT- und DISCOVER_RESP-Beobachtungen erfolgreich gespeichert
+- passive ADVERT- und DISCOVER_RESP-Beobachtungen gespeichert
 - eigener Standort aus `APPSTART` geografisch aufgelöst
-
-## Datenmodell-Kompatibilität
-
-Die folgenden Tabellen werden von beiden Erfassungswegen für die aktuellen Reports kompatibel befüllt:
-
-```text
-mc_rx
-mc_contacts
-mc_contact_observations
-mc_companion_info
-```
-
-Zusätzliche PacketTap-spezifische Felder wie `capture_sequence`, `crc_ok`, `received_unix_ns`, `packettap_version` oder `packettap_flags` stehen beim TCP-Companion nicht zwingend zur Verfügung. Diese Unterschiede betreffen den Erfassungsweg und sind für die derzeitigen Mesh-, Repeater- und Nachbar-Auswertungen nicht erforderlich.
 
 ## Weitere Dokumentation
 
-Die technischen Hintergründe und Designentscheidungen sind beschrieben in:
+Technische Hintergründe und Designentscheidungen:
 
 [`docs/architecture.md`](docs/architecture.md)
-
-## Aktueller Entwicklungsstand
-
-Der PacketTap-Erfassungsweg ist für Windows getestet. Der TCP-Companion-Collector ist zusätzlich unter Linux/systemd produktiv getestet.
-
-Der Schwerpunkt der aktuellen Version liegt auf:
-
-- zuverlässiger PacketTap-Erfassung und QuestDB-Import
-- direkter Erfassung über einen Standard-MeshCore-TCP-Companion
-- sicherer Steuerung von Receiver und Importer
-- standortbezogener Mesh-Auswertung
-- detaillierter Repeater-Auswertung
-- Analyse direkter Nachbarn
-- interaktiven Kartenansichten
-- einheitlicher Report-Darstellung
-- gezieltem dauerhaften Speichern als PDF
