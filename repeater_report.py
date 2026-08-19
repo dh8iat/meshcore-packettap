@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap - Repeater Report v0.49
+MeshCore PacketTap - Repeater Report v0.50
 =========================================
 
 Direkt auf das dokumentierte QuestDB-Datenmodell von meshcore-packettap
@@ -484,15 +484,24 @@ def load_contact_observations(
 ) -> list[dict[str, Any]]:
     available = db.table_columns("mc_contact_observations")
 
+    # Je nach Entstehungsweg der QuestDB-Tabelle heißt die designierte
+    # Zeitspalte entweder "ts" (ältere/manuell angelegte Tabellen) oder
+    # "timestamp" (per ILP automatisch angelegte Tabellen).
+    if "ts" in available:
+        time_column = "ts"
+    elif "timestamp" in available:
+        time_column = "timestamp"
+    else:
+        raise RuntimeError(
+            "mc_contact_observations fehlt Zeitspalte: ts oder timestamp"
+        )
+
     required = {
-        "ts",
         "public_key",
         "receiver_id",
         "receiver_name",
         "node_role",
         "hop_count",
-        "rssi_dbm",
-        "snr_db",
     }
     missing = required - available
     if missing:
@@ -501,30 +510,42 @@ def load_contact_observations(
             + ", ".join(sorted(missing))
         )
 
-    where = [time_filter("ts", period_from, period_to)]
+    # Einige Observation-Spalten entstehen in QuestDB bei ILP erst, sobald
+    # erstmals ein nicht-NULL-Wert geschrieben wurde. Der Report behandelt
+    # diese Felder deshalb als optional.
+    optional_columns = (
+        "rssi_dbm",
+        "snr_db",
+        "region",
+        "packet_payload_sha256",
+        "public_key_bytes",
+        "discover_tag",
+        "discover_snr",
+        "source_type",
+    )
+
+    select_optional = [
+        column if column in available else f"NULL AS {column}"
+        for column in optional_columns
+    ]
+
+    where = [time_filter(time_column, period_from, period_to)]
     rf = receiver_filter(receiver_id, receiver_name)
     if rf:
         where.append(rf)
 
     sql = f"""
         SELECT
-            ts,
+            {time_column} AS ts,
             public_key,
             receiver_id,
             receiver_name,
             node_role,
             hop_count,
-            rssi_dbm,
-            snr_db,
-            region,
-            packet_payload_sha256,
-            public_key_bytes,
-            discover_tag,
-            discover_snr,
-            source_type
+            {', '.join(select_optional)}
         FROM mc_contact_observations
         WHERE {' AND '.join(where)}
-        ORDER BY ts
+        ORDER BY {time_column}
     """
     return db.rows(sql)
 
