@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.45
+MeshCore PacketTap Web UI v0.56
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
@@ -53,12 +53,13 @@ import repeater_report as rr
 import mesh_report as mr
 
 
-APP_VERSION = "0.45"
+APP_VERSION = "0.56"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
 MAP_DIR = BASE_DIR / "map"
 REPORTS_DIR = BASE_DIR / "reports"
 PREVIEW_DIR = BASE_DIR / "state" / "report_preview"
+NODE_DIRECTORY_DB = BASE_DIR / "state" / "node_directory.db"
 
 DEFAULT_CONFIG = {
     "questdb_host": "192.168.1.2",
@@ -327,7 +328,10 @@ def generate_report(
     db = rr.QuestDB(config["questdb_host"], config["questdb_port"])
 
     contacts = rr.load_contacts(db)
-    resolver = rr.ContactResolver(contacts)
+    resolver = rr.ContactResolver(
+        contacts,
+        node_directory_db=NODE_DIRECTORY_DB,
+    )
     selected = resolve_repeater(resolver, repeater_query)
 
     receiver_id = config.get("receiver_id") or None
@@ -364,6 +368,8 @@ def generate_report(
         period_to,
         receiver_id,
         receiver_name,
+        NODE_DIRECTORY_DB,
+        config.get("max_geo_distance_km", 500.0),
     )
 
     filename = (
@@ -409,7 +415,10 @@ def generate_mesh_report(
     )
 
     contacts = rr.load_contacts(db)
-    resolver = rr.ContactResolver(contacts)
+    resolver = rr.ContactResolver(
+        contacts,
+        node_directory_db=NODE_DIRECTORY_DB,
+    )
 
     observer_name, observer_id = mr.determine_observer(
         rows,
@@ -497,76 +506,780 @@ def mesh_overview_dates() -> tuple[str, str]:
     return start.isoformat(), today.isoformat()
 
 
+def _mesh_role_label(role: str) -> str:
+    labels = {
+        "repeater": "Repeater",
+        "companion": "Companion",
+        "room_server": "Room Server",
+        "sensor": "Sensor",
+        "unknown": "Unbekannt",
+    }
+    return labels.get(role, role.replace("_", " ").title() if role else "Unbekannt")
+
+
+def _render_mesh_role_map(
+    nodes_by_role: dict[str, list[dict[str, Any]]],
+    observer_geo: Any | None,
+    observer_name: str,
+) -> str:
+    """
+    Interactive Leaflet map with role overlays.
+
+    v0.54:
+    - browser-restored checkbox state is explicitly reset on page load
+    - Repeater layer is enabled by default, all other roles are disabled
+    - layer visibility is synchronized from checkbox state after all groups exist
+    - invalid coordinates are skipped instead of aborting marker creation
+    """
+    payload = {
+        "observer": (
+            {
+                "name": observer_name,
+                "lat": observer_geo.lat,
+                "lon": observer_geo.lon,
+            }
+            if observer_geo is not None
+            else None
+        ),
+        "roles": nodes_by_role,
+    }
+
+    data_json = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+    ).replace("</", "<\\/")
+
+    role_order = [
+        role
+        for role in (
+            "repeater",
+            "companion",
+            "room_server",
+            "sensor",
+            "unknown",
+        )
+        if role in nodes_by_role
+    ]
+    role_order += sorted(
+        role
+        for role in nodes_by_role
+        if role not in role_order
+    )
+
+    controls = "".join(
+        f"""
+        <label class="mesh-role-toggle">
+          <input
+            type="checkbox"
+            data-mesh-role="{esc(role)}"
+            data-default-visible="{'1' if role == 'repeater' else '0'}"
+            autocomplete="off"
+          >
+          {_mesh_role_label(role)} ({len(nodes_by_role[role])})
+        </label>
+        """
+        for role in role_order
+    )
+
+    return f"""
+    <div class="mesh-map-toolbar">
+      <div class="mesh-role-toggles">
+        <strong>Einblenden:</strong>
+        {controls}
+      </div>
+      <div class="mesh-map-search">
+        <div class="mesh-map-search-input">
+          <input
+            id="mesh-role-search"
+            type="search"
+            placeholder="Node suchen – Name oder Public Key"
+            autocomplete="off"
+            aria-autocomplete="list"
+            aria-controls="mesh-role-search-suggestions"
+            aria-expanded="false"
+          >
+          <div
+            id="mesh-role-search-suggestions"
+            class="map-search-suggestions mesh-role-search-suggestions"
+            role="listbox"
+          ></div>
+        </div>
+        <button type="button" id="mesh-role-search-btn">Suchen</button>
+      </div>
+    </div>
+
+    <div id="mesh-role-map" class="leaflet-map"></div>
+
+    <script>
+    (function() {{
+      const data = {data_json};
+      const mapElement = document.getElementById("mesh-role-map");
+
+      if (!mapElement || typeof L === "undefined") {{
+        if (mapElement) {{
+          mapElement.innerHTML =
+            "<div class='map-error'>Leaflet wurde nicht geladen.</div>";
+        }}
+        return;
+      }}
+
+      const map = L.map("mesh-role-map", {{
+        attributionControl: true,
+        zoomControl: false,
+        fadeAnimation: false,
+        zoomAnimation: false
+      }});
+
+      L.control.zoom({{
+        position: "bottomright"
+      }}).addTo(map);
+
+      L.tileLayer(
+        "https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png",
+        {{
+          maxZoom: 19,
+          attribution: "&copy; OpenStreetMap contributors"
+        }}
+      ).addTo(map);
+
+      const styles = {{
+        repeater: {{
+          radius: 6,
+          color: "#333",
+          fillColor: "#555"
+        }},
+        companion: {{
+          radius: 6,
+          color: "#175d9c",
+          fillColor: "#3d8bd1"
+        }},
+        room_server: {{
+          radius: 6,
+          color: "#7a4b00",
+          fillColor: "#c98720"
+        }},
+        sensor: {{
+          radius: 6,
+          color: "#246b35",
+          fillColor: "#4b9b60"
+        }},
+        unknown: {{
+          radius: 5,
+          color: "#666",
+          fillColor: "#999"
+        }}
+      }};
+
+      const labels = {{
+        repeater: "Repeater",
+        companion: "Companion",
+        room_server: "Room Server",
+        sensor: "Sensor",
+        unknown: "Unbekannt"
+      }};
+
+      const groups = {{}};
+      const searchableMarkers = [];
+      const initialBounds = [];
+
+      function escapeHtml(value) {{
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }}
+
+      function validCoordinate(value, min, max) {{
+        const number = Number(value);
+        return Number.isFinite(number) && number >= min && number <= max;
+      }}
+
+      Object.entries(data.roles || {{}}).forEach(([role, nodes]) => {{
+        const style = styles[role] || styles.unknown;
+        const roleMarkers = [];
+
+        (Array.isArray(nodes) ? nodes : []).forEach(node => {{
+          if (
+            !validCoordinate(node.lat, -90, 90)
+            || !validCoordinate(node.lon, -180, 180)
+          ) {{
+            return;
+          }}
+
+          const point = [
+            Number(node.lat),
+            Number(node.lon)
+          ];
+
+          const marker = L.circleMarker(
+            point,
+            {{
+              radius: style.radius,
+              weight: 2,
+              color: style.color,
+              fillColor: style.fillColor,
+              fillOpacity: 0.85
+            }}
+          );
+
+          marker.bindPopup(
+            "<strong>"
+            + escapeHtml(node.name || "–")
+            + "</strong><br>"
+            + "Rolle: "
+            + escapeHtml(labels[role] || role)
+            + "<br><span class='mono'>"
+            + escapeHtml(node.public_key || "")
+            + "</span>"
+          );
+
+          roleMarkers.push(marker);
+
+          searchableMarkers.push({{
+            marker: marker,
+            role: role,
+            displayName: String(node.name || ""),
+            name: String(node.name || "").toLowerCase(),
+            publicKey: String(node.public_key || "").toLowerCase()
+          }});
+
+          if (role === "repeater") {{
+            initialBounds.push(point);
+          }}
+        }});
+
+        groups[role] = L.layerGroup(roleMarkers);
+      }});
+
+      if (
+        data.observer
+        && validCoordinate(data.observer.lat, -90, 90)
+        && validCoordinate(data.observer.lon, -180, 180)
+      ) {{
+        const observerPoint = [
+          Number(data.observer.lat),
+          Number(data.observer.lon)
+        ];
+
+        L.circleMarker(
+          observerPoint,
+          {{
+            radius: 8,
+            weight: 3,
+            color: "#111",
+            fillColor: "#fff",
+            fillOpacity: 1
+          }}
+        ).addTo(map).bindPopup(
+          "<strong>"
+          + escapeHtml(
+              data.observer.name || "Beobachtungsstandort"
+            )
+          + "</strong><br>Beobachtungsstandort"
+        );
+
+        initialBounds.push(observerPoint);
+      }}
+
+      const toggles = Array.from(
+        document.querySelectorAll("[data-mesh-role]")
+      );
+
+      // Browser may restore form state on reload/back navigation.
+      // Always start from the explicit application default.
+      toggles.forEach(input => {{
+        input.checked =
+          input.dataset.defaultVisible === "1";
+      }});
+
+      function syncRoleLayers() {{
+        toggles.forEach(input => {{
+          const role = input.dataset.meshRole;
+          const group = groups[role];
+
+          if (!group) {{
+            return;
+          }}
+
+          const active = map.hasLayer(group);
+
+          if (input.checked && !active) {{
+            group.addTo(map);
+          }}
+          else if (!input.checked && active) {{
+            map.removeLayer(group);
+          }}
+        }});
+      }}
+
+      toggles.forEach(input => {{
+        input.addEventListener(
+          "change",
+          syncRoleLayers
+        );
+      }});
+
+      // All groups now exist; activate Repeater immediately.
+      syncRoleLayers();
+
+      if (initialBounds.length) {{
+        map.fitBounds(
+          initialBounds,
+          {{
+            padding: [30, 30],
+            maxZoom: 11
+          }}
+        );
+      }}
+      else {{
+        map.setView([49.0, 9.0], 7);
+      }}
+
+      // Leaflet can need a size refresh after layout/rendering.
+      setTimeout(function() {{
+        map.invalidateSize(false);
+      }}, 0);
+
+      const searchInput =
+        document.getElementById("mesh-role-search");
+      const suggestionsElement =
+        document.getElementById("mesh-role-search-suggestions");
+
+      let suggestionHits = [];
+      let activeSuggestion = -1;
+
+      function roleIsActive(role) {{
+        const toggle = document.querySelector(
+          '[data-mesh-role="' + role + '"]'
+        );
+        return Boolean(toggle && toggle.checked);
+      }}
+
+      function activeSearchMarkers() {{
+        return searchableMarkers.filter(item =>
+          roleIsActive(item.role)
+        );
+      }}
+
+      function closeSuggestions() {{
+        suggestionHits = [];
+        activeSuggestion = -1;
+
+        if (suggestionsElement) {{
+          suggestionsElement.innerHTML = "";
+          suggestionsElement.classList.remove("visible");
+        }}
+
+        searchInput?.setAttribute(
+          "aria-expanded",
+          "false"
+        );
+      }}
+
+      function setActiveSuggestion(index) {{
+        if (!suggestionsElement || !suggestionHits.length) {{
+          activeSuggestion = -1;
+          return;
+        }}
+
+        activeSuggestion =
+          (index + suggestionHits.length)
+          % suggestionHits.length;
+
+        suggestionsElement
+          .querySelectorAll(".map-search-suggestion")
+          .forEach((element, itemIndex) => {{
+            element.classList.toggle(
+              "active",
+              itemIndex === activeSuggestion
+            );
+          }});
+      }}
+
+      function chooseSearchHit(hit) {{
+        if (!hit || !roleIsActive(hit.role)) {{
+          return;
+        }}
+
+        if (searchInput) {{
+          searchInput.value =
+            hit.displayName || hit.publicKey;
+        }}
+
+        closeSuggestions();
+
+        map.setView(
+          hit.marker.getLatLng(),
+          Math.max(map.getZoom(), 11)
+        );
+        hit.marker.openPopup();
+      }}
+
+      function matchingSearchHits(query) {{
+        const normalized =
+          String(query || "")
+            .trim()
+            .toLowerCase();
+
+        if (!normalized) {{
+          return [];
+        }}
+
+        return activeSearchMarkers()
+          .filter(item =>
+            item.name.includes(normalized)
+            || item.publicKey.startsWith(normalized)
+          )
+          .sort((a, b) => {{
+            const aNameStarts =
+              a.name.startsWith(normalized) ? 0 : 1;
+            const bNameStarts =
+              b.name.startsWith(normalized) ? 0 : 1;
+
+            if (aNameStarts !== bNameStarts) {{
+              return aNameStarts - bNameStarts;
+            }}
+
+            return (
+              a.name.localeCompare(b.name)
+              || a.publicKey.localeCompare(b.publicKey)
+            );
+          }})
+          .slice(0, 12);
+      }}
+
+      function renderSuggestions() {{
+        if (!searchInput || !suggestionsElement) {{
+          return;
+        }}
+
+        const query = searchInput.value;
+        suggestionHits =
+          matchingSearchHits(query);
+        activeSuggestion = -1;
+        suggestionsElement.innerHTML = "";
+
+        if (!String(query || "").trim()) {{
+          closeSuggestions();
+          return;
+        }}
+
+        if (!suggestionHits.length) {{
+          const empty =
+            document.createElement("div");
+          empty.className =
+            "map-search-suggestion empty";
+          empty.textContent =
+            "Kein Treffer in den aktivierten Rollen.";
+          suggestionsElement.appendChild(empty);
+          suggestionsElement.classList.add("visible");
+          searchInput.setAttribute(
+            "aria-expanded",
+            "true"
+          );
+          return;
+        }}
+
+        suggestionHits.forEach((hit, index) => {{
+          const button =
+            document.createElement("button");
+          button.type = "button";
+          button.className =
+            "map-search-suggestion";
+          button.setAttribute(
+            "role",
+            "option"
+          );
+
+          const name =
+            document.createElement("span");
+          name.className =
+            "suggestion-name";
+          name.textContent =
+            hit.displayName || "(ohne Namen)";
+
+          const key =
+            document.createElement("span");
+          key.className =
+            "suggestion-key";
+
+          const shortKey =
+            hit.publicKey.length > 16
+              ? hit.publicKey.slice(0, 8)
+                + "…"
+                + hit.publicKey.slice(-6)
+              : hit.publicKey;
+
+          key.textContent =
+            (labels[hit.role] || hit.role)
+            + " · "
+            + shortKey;
+
+          button.appendChild(name);
+          button.appendChild(key);
+
+          button.addEventListener(
+            "mousedown",
+            event => {{
+              event.preventDefault();
+              chooseSearchHit(
+                suggestionHits[index]
+              );
+            }}
+          );
+
+          suggestionsElement.appendChild(
+            button
+          );
+        }});
+
+        suggestionsElement.classList.add(
+          "visible"
+        );
+        searchInput.setAttribute(
+          "aria-expanded",
+          "true"
+        );
+      }}
+
+      function searchNode() {{
+        if (!searchInput) {{
+          return;
+        }}
+
+        const query =
+          String(searchInput.value || "")
+            .trim()
+            .toLowerCase();
+
+        if (!query) {{
+          closeSuggestions();
+          return;
+        }}
+
+        const hits =
+          matchingSearchHits(query);
+
+        if (hits.length) {{
+          chooseSearchHit(hits[0]);
+        }}
+      }}
+
+      searchInput?.addEventListener(
+        "input",
+        renderSuggestions
+      );
+
+      searchInput?.addEventListener(
+        "focus",
+        () => {{
+          if (searchInput.value.trim()) {{
+            renderSuggestions();
+          }}
+        }}
+      );
+
+      searchInput?.addEventListener(
+        "keydown",
+        event => {{
+          if (
+            event.key === "ArrowDown"
+            && suggestionHits.length
+          ) {{
+            event.preventDefault();
+            setActiveSuggestion(
+              activeSuggestion + 1
+            );
+            return;
+          }}
+
+          if (
+            event.key === "ArrowUp"
+            && suggestionHits.length
+          ) {{
+            event.preventDefault();
+            setActiveSuggestion(
+              activeSuggestion <= 0
+                ? suggestionHits.length - 1
+                : activeSuggestion - 1
+            );
+            return;
+          }}
+
+          if (event.key === "Escape") {{
+            closeSuggestions();
+            return;
+          }}
+
+          if (event.key === "Enter") {{
+            event.preventDefault();
+
+            if (
+              activeSuggestion >= 0
+              && suggestionHits[
+                activeSuggestion
+              ]
+            ) {{
+              chooseSearchHit(
+                suggestionHits[
+                  activeSuggestion
+                ]
+              );
+            }}
+            else {{
+              searchNode();
+            }}
+          }}
+        }}
+      );
+
+      document
+        .getElementById(
+          "mesh-role-search-btn"
+        )
+        ?.addEventListener(
+          "click",
+          searchNode
+        );
+
+      document.addEventListener(
+        "click",
+        event => {{
+          if (
+            suggestionsElement
+            && searchInput
+            && !suggestionsElement.contains(
+              event.target
+            )
+            && event.target !== searchInput
+          ) {{
+            closeSuggestions();
+          }}
+        }}
+      );
+
+      // Suche und Vorschlagsliste berücksichtigen immer nur
+      // die aktuell aktivierten Rollen.
+      toggles.forEach(input => {{
+        input.addEventListener(
+          "change",
+          () => {{
+            if (
+              searchInput
+              && searchInput.value.trim()
+            ) {{
+              renderSuggestions();
+            }}
+            else {{
+              closeSuggestions();
+            }}
+          }}
+        );
+      }});
+    }})();
+    </script>
+    """
+
 def build_mesh_overview(
     config: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
-    """Build the 28-day interactive mesh map shown directly on /mesh."""
     date_from, date_to = mesh_overview_dates()
     period_from = normalize_date(date_from, end=False)
     period_to = normalize_date(date_to, end=True)
 
-    db = rr.QuestDB(
-        config["questdb_host"],
-        config["questdb_port"],
-    )
-
+    db = rr.QuestDB(config["questdb_host"], config["questdb_port"])
     receiver_id = config.get("receiver_id") or None
     receiver_name = config.get("receiver_name") or None
 
-    rows = mr.load_mesh_rx(
-        db,
-        period_from,
-        period_to,
-        receiver_id,
-        receiver_name,
-    )
-
+    rows = mr.load_mesh_rx(db, period_from, period_to, receiver_id, receiver_name)
     contacts = rr.load_contacts(db)
-    resolver = rr.ContactResolver(contacts)
+    resolver = rr.ContactResolver(contacts, node_directory_db=NODE_DIRECTORY_DB)
 
-    observer_name, observer_id = mr.determine_observer(
-        rows,
-        receiver_id,
-        receiver_name,
-    )
+    observer_name, observer_id = mr.determine_observer(rows, receiver_id, receiver_name)
+    repeaters = mr.analyze_repeater_activity(rows, resolver)
 
-    repeaters = mr.analyze_repeater_activity(
-        rows,
-        resolver,
-    )
     geo_repeaters = mr.load_geo_repeaters(db)
     geo_contacts = mr.load_geo_contacts(db)
-    observer_geo = mr.observer_geo_from_contacts(
-        geo_contacts,
-        observer_id,
+    observer_geo = mr.observer_geo_from_contacts(geo_contacts, observer_id)
+    max_distance = float(config.get("max_geo_distance_km", 500.0))
+
+    geo_repeaters, rejected_repeaters = mr.filter_geo_by_observer_distance(
+        geo_repeaters, observer_geo, max_distance
     )
-    geo_repeaters, rejected_geo = mr.filter_geo_by_observer_distance(
-        geo_repeaters,
+    extent, observed_geo = mr.analyze_extent(repeaters, geo_repeaters)
+
+    observations = rr.load_contact_observations(
+        db, period_from, period_to, receiver_id, receiver_name
+    )
+    observed_roles: dict[str, set[str]] = defaultdict(set)
+    for row in observations:
+        key = rr.norm(row.get("public_key"))
+        if rr.is_full_public_key(key):
+            observed_roles[rr.norm(row.get("node_role")) or "unknown"].add(key)
+
+    latest_contacts = {c.public_key: c for c in contacts}
+
+    nodes_by_role: dict[str, list[dict[str, Any]]] = {
+        "repeater": [
+            {"public_key": g.public_key, "name": g.name, "lat": g.lat, "lon": g.lon}
+            for g in observed_geo
+        ]
+    }
+    role_counts = {"repeater": len(repeaters)}
+    role_geo_counts = {"repeater": len(observed_geo)}
+    role_rejected_counts = {"repeater": len(rejected_repeaters)}
+
+    for role, keys in observed_roles.items():
+        if role == "repeater":
+            continue
+        role_counts[role] = len(keys)
+        accepted = []
+        rejected = 0
+        for key in sorted(keys):
+            c = latest_contacts.get(key)
+            if c is None or c.adv_lat is None or c.adv_lon is None:
+                continue
+            try:
+                lat, lon = float(c.adv_lat), float(c.adv_lon)
+            except (TypeError, ValueError):
+                continue
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (abs(lat) < 1e-9 and abs(lon) < 1e-9):
+                rejected += 1
+                continue
+            if observer_geo is not None and max_distance > 0:
+                if mr.haversine_km(observer_geo.lat, observer_geo.lon, lat, lon) > max_distance:
+                    rejected += 1
+                    continue
+            accepted.append({
+                "public_key": key,
+                "name": c.adv_name or "–",
+                "lat": lat,
+                "lon": lon,
+            })
+        nodes_by_role[role] = accepted
+        role_geo_counts[role] = len(accepted)
+        role_rejected_counts[role] = rejected
+
+    map_html = _render_mesh_role_map(
+        nodes_by_role,
         observer_geo,
-        config.get("max_geo_distance_km", 500.0),
-    )
-    extent, observed_geo = mr.analyze_extent(
-        repeaters,
-        geo_repeaters,
+        config.get("site_name") or observer_name,
     )
 
-    map_html = mr.render_mesh_map(
-        observed_geo,
-        observer_id,
-        extent,
-        observer_geo,
-    )
-
-    summary = {
+    return map_html, {
         "repeaters": len(repeaters),
         "geo_repeaters": len(observed_geo),
-        "rejected_geo": len(rejected_geo),
-        "max_geo_distance_km": config.get("max_geo_distance_km", 500.0),
+        "rejected_geo": len(rejected_repeaters),
+        "max_geo_distance_km": max_distance,
         "date_from": date_from,
         "date_to": date_to,
+        "role_counts": role_counts,
+        "role_geo_counts": role_geo_counts,
+        "role_rejected_counts": role_rejected_counts,
     }
-
-    return map_html, summary
 
 
 def _preview_token(value: str) -> str:
@@ -1848,6 +2561,85 @@ button:hover, .button:hover {{ opacity:.88; }}
   padding:12px;
   background:#fff;
 }}
+.mesh-map-toolbar {{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  flex-wrap:wrap;
+  margin:0 0 10px;
+}}
+.mesh-role-toggles {{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex-wrap:wrap;
+}}
+.mesh-role-toggle {{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  margin:0;
+  font-size:.92rem;
+}}
+.mesh-role-toggle input {{
+  width:auto;
+  margin:0;
+}}
+.mesh-map-search {{
+  display:flex;
+  gap:6px;
+  align-items:flex-start;
+}}
+.mesh-map-search-input {{
+  position:relative;
+  min-width:320px;
+}}
+.mesh-map-search-input > input {{
+  width:100%;
+  min-width:320px;
+}}
+.mesh-role-search-suggestions {{
+  left:0;
+  right:0;
+  top:100%;
+  margin-top:4px;
+  z-index:1200;
+  max-height:360px;
+  overflow-y:auto;
+}}
+.mesh-role-search-suggestions .map-search-suggestion {{
+  display:block;
+  width:100%;
+  text-align:left;
+  padding:8px 12px;
+  line-height:1.25;
+}}
+.mesh-role-search-suggestions .suggestion-name {{
+  display:block;
+  font-size:.92rem;
+  font-weight:400;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}}
+.mesh-role-search-suggestions .suggestion-key {{
+  display:block;
+  margin-top:2px;
+  font-size:.78rem;
+  font-weight:400;
+  color:#666;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}}
+.mesh-map-search > button {{
+  white-space:nowrap;
+}}
+.mesh-role-summary summary {{
+  cursor:pointer;
+}}
+
 .leaflet-map {{
   width:100%;
   height:520px;
@@ -2266,7 +3058,10 @@ def direct_neighbor_dataset(
         config["questdb_port"],
     )
     contacts = rr.load_contacts(db)
-    resolver = rr.ContactResolver(contacts)
+    resolver = rr.ContactResolver(
+        contacts,
+        node_directory_db=NODE_DIRECTORY_DB,
+    )
 
     rows = rr.load_rx(
         db,
@@ -3805,6 +4600,259 @@ def save_neighbor_analysis(
 
 
 
+
+def uncached_path_ids(
+    config: dict[str, Any],
+    days: int = 7,
+    limit: int | None = 50,
+) -> list[dict[str, Any]]:
+    """
+    Collect path IDs seen in mc_rx that are:
+      - not uniquely resolvable from local mc_contacts
+      - not present as a valid cached lookup in node_directory.db
+
+    No network access is performed here.
+    """
+    today = date.today()
+    date_to = today.strftime("%Y-%m-%d")
+    date_from = (today - timedelta(days=max(1, days) - 1)).strftime("%Y-%m-%d")
+
+    period_from = normalize_date(date_from, end=False)
+    period_to = normalize_date(date_to, end=True)
+
+    db = rr.QuestDB(
+        config["questdb_host"],
+        config["questdb_port"],
+    )
+    contacts = rr.load_contacts(db)
+    resolver = rr.ContactResolver(
+        contacts,
+        node_directory_db=NODE_DIRECTORY_DB,
+    )
+
+    try:
+        rows = rr.load_rx(
+            db,
+            period_from,
+            period_to,
+            config.get("receiver_id") or None,
+            config.get("receiver_name") or None,
+        )
+
+        counts: Counter[str] = Counter()
+
+        for row in rows:
+            size = rr.to_int(row.get("path_hash_size"))
+            nodes = rr.parse_nodes(row.get("nodes"))
+
+            for path_id in nodes:
+                pid = rr.norm(path_id)
+                if not pid:
+                    continue
+
+                local_matches = resolver.resolve_path_id(pid, size)
+                if local_matches:
+                    continue
+
+                directory = resolver.resolve_directory_path_id(pid)
+                if directory.status != "not_cached":
+                    continue
+
+                counts[pid] += 1
+
+        ranked = counts.most_common(max(1, limit)) if limit is not None else counts.most_common()
+        return [
+            {"path_id": pid, "observations": count}
+            for pid, count in ranked
+        ]
+    finally:
+        resolver.close()
+
+
+def refresh_directory_path_ids(
+    path_ids: list[str],
+) -> list[dict[str, Any]]:
+    """
+    Deliberate online enrichment step.
+
+    Imports node_directory.py lazily so report generation itself never gains
+    a network dependency.
+    """
+    try:
+        import node_directory as nd
+    except Exception as exc:
+        raise RuntimeError(
+            "node_directory.py konnte nicht importiert werden. "
+            "Bitte node_directory.py im selben Verzeichnis wie report_server.py ablegen."
+        ) from exc
+
+    directory = nd.NodeDirectory(
+        db_path=NODE_DIRECTORY_DB,
+    )
+
+    results: list[dict[str, Any]] = []
+    try:
+        for raw in path_ids:
+            pid = nd.norm_hex(raw)
+            if not nd.valid_path_id(pid):
+                continue
+
+            try:
+                result = directory.lookup(
+                    pid,
+                    refresh=True,
+                )
+                results.append(
+                    {
+                        "path_id": pid,
+                        "status": result["status"],
+                        "candidate_count": len(result["candidates"]),
+                        "error": "",
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "path_id": pid,
+                        "status": "error",
+                        "candidate_count": 0,
+                        "error": str(exc),
+                    }
+                )
+    finally:
+        directory.close()
+
+    return results
+
+
+def directory_status_summary(
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Read node-directory status summary and recent lookup history."""
+    result = {
+        "directory_unique": 0,
+        "directory_ambiguous": 0,
+        "unresolved": 0,
+        "lookup_error": 0,
+        "recent": [],
+    }
+
+    if not NODE_DIRECTORY_DB.exists():
+        return result
+
+    import sqlite3
+    import datetime as _dt
+
+    try:
+        conn = sqlite3.connect(
+            f"file:{NODE_DIRECTORY_DB.resolve()}?mode=ro",
+            uri=True,
+        )
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    path_id,
+                    status,
+                    candidate_count,
+                    checked_at,
+                    expires_at,
+                    source
+                FROM path_lookup_cache
+                ORDER BY checked_at DESC
+                LIMIT ?
+                """,
+                (max(1, limit),),
+            ).fetchall()
+
+            for row in rows:
+                status = str(row["status"] or "")
+                if status in result:
+                    result[status] += 1
+
+                checked_at = int(row["checked_at"] or 0)
+                checked_text = (
+                    _dt.datetime.fromtimestamp(checked_at).strftime("%d.%m.%Y %H:%M")
+                    if checked_at
+                    else "–"
+                )
+
+                result["recent"].append(
+                    {
+                        "path_id": str(row["path_id"] or ""),
+                        "status": status,
+                        "candidate_count": int(row["candidate_count"] or 0),
+                        "checked_at": checked_text,
+                    }
+                )
+        finally:
+            conn.close()
+    except Exception:
+        return result
+
+    return result
+
+
+def directory_lookup_errors(
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return currently cached online lookup errors. No network access."""
+    if not NODE_DIRECTORY_DB.exists():
+        return []
+
+    import sqlite3
+    import time
+
+    try:
+        conn = sqlite3.connect(
+            f"file:{NODE_DIRECTORY_DB.resolve()}?mode=ro",
+            uri=True,
+        )
+        conn.row_factory = sqlite3.Row
+        try:
+            columns = {
+                row["name"]
+                for row in conn.execute(
+                    "PRAGMA table_info(path_lookup_cache)"
+                )
+            }
+            if "error_text" not in columns:
+                return []
+
+            now = int(time.time())
+            rows = conn.execute(
+                """
+                SELECT
+                    path_id,
+                    status,
+                    checked_at,
+                    expires_at,
+                    error_text
+                FROM path_lookup_cache
+                WHERE status = 'lookup_error'
+                  AND expires_at >= ?
+                ORDER BY checked_at DESC
+                LIMIT ?
+                """,
+                (now, max(1, limit)),
+            ).fetchall()
+
+            return [
+                {
+                    "path_id": str(row["path_id"]),
+                    "checked_at": int(row["checked_at"] or 0),
+                    "expires_at": int(row["expires_at"] or 0),
+                    "error_text": str(row["error_text"] or ""),
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
 def form_page(
     config: dict[str, Any],
     message: str = "",
@@ -3839,6 +4887,164 @@ def form_page(
         msg_html = f'<div class="message {cls}">{esc(message)}</div>'
 
     default_from, default_to = default_report_dates()
+
+    try:
+        all_pending_directory = uncached_path_ids(
+            config,
+            days=7,
+            limit=None,
+        )
+        pending_directory = all_pending_directory[:50]
+        pending_total = len(all_pending_directory)
+        status_summary = directory_status_summary(limit=50)
+
+        pending_rows = "".join(
+            f"""
+            <tr>
+              <td><span class="mono">{esc(item['path_id'])}</span></td>
+              <td class="num">{esc(item['observations'])}</td>
+            </tr>
+            """
+            for item in pending_directory
+        )
+
+        recent_rows = ""
+        for item in status_summary["recent"]:
+            status = item["status"]
+            if status == "directory_unique":
+                status_label = "eindeutig"
+            elif status == "directory_ambiguous":
+                status_label = "mehrdeutig"
+            elif status == "unresolved":
+                status_label = "ohne Treffer"
+            elif status == "lookup_error":
+                status_label = "Online-Fehler"
+            else:
+                status_label = status or "–"
+
+            recent_rows += f"""
+            <tr>
+              <td><span class="mono">{esc(item['path_id'])}</span></td>
+              <td>{esc(status_label)}</td>
+              <td class="num">{esc(item['candidate_count'])}</td>
+              <td>{esc(item['checked_at'])}</td>
+            </tr>
+            """
+
+        directory_panel = f"""
+<div class="card">
+  <h2>Path-ID-Auflösung</h2>
+
+  <p class="help">
+    Ungeprüft bedeutet: Die Path-ID ist lokal nicht eindeutig auflösbar und
+    wurde noch nicht im Online-Verzeichnis gesucht. Die Online-Prüfung verändert
+    keine QuestDB-Daten; Ergebnisse werden ausschließlich in
+    <span class="mono">state/node_directory.db</span> gespeichert.
+  </p>
+
+  <div class="stats-grid" style="margin-top:14px">
+    <div class="stat-card">
+      <div class="stat-label">Ungeprüft</div>
+      <div class="stat-value">{esc(pending_total)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Eindeutig</div>
+      <div class="stat-value">{esc(status_summary['directory_unique'])}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Mehrdeutig</div>
+      <div class="stat-value">{esc(status_summary['directory_ambiguous'])}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Ohne Treffer</div>
+      <div class="stat-value">{esc(status_summary['unresolved'])}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Online-Fehler</div>
+      <div class="stat-value">{esc(status_summary['lookup_error'])}</div>
+    </div>
+  </div>
+
+  <details open style="margin-top:18px">
+    <summary><strong>Noch ungeprüfte Path-IDs</strong></summary>
+    <p class="help">
+      Zeitraum: letzte 7 Tage · nach Beobachtungshäufigkeit sortiert ·
+      {esc(pending_total)} ungeprüft insgesamt · {esc(len(pending_directory))} angezeigt.
+    </p>
+"""
+
+        if pending_directory:
+            directory_panel += f"""
+    <table class="neighbor-advert-table">
+      <thead>
+        <tr>
+          <th>Path-ID</th>
+          <th class="num">Beobachtungen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {pending_rows}
+      </tbody>
+    </table>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">
+      <form method="post" action="/directory-refresh">
+        <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
+        <button type="submit">50 angezeigte online prüfen</button>
+      </form>
+      <form method="post" action="/directory-refresh-all">
+        <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
+        <button type="submit">Alle {esc(pending_total)} online prüfen</button>
+      </form>
+    </div>
+"""
+        else:
+            directory_panel += """
+    <p class="help">Aktuell keine ungeprüften Path-IDs in diesem Zeitraum.</p>
+"""
+
+        directory_panel += """
+  </details>
+"""
+
+        if recent_rows:
+            directory_panel += f"""
+  <details style="margin-top:18px">
+    <summary><strong>Zuletzt geprüfte Path-IDs</strong></summary>
+    <p class="help">
+      Die letzten bis zu 50 Cache-Einträge. So ist direkt sichtbar,
+      was die Online-Prüfung ergeben hat.
+    </p>
+
+    <table class="neighbor-advert-table">
+      <thead>
+        <tr>
+          <th>Path-ID</th>
+          <th>Status</th>
+          <th class="num">Treffer</th>
+          <th>Letzter Check</th>
+        </tr>
+      </thead>
+      <tbody>
+        {recent_rows}
+      </tbody>
+    </table>
+  </details>
+"""
+
+        directory_panel += """
+</div>
+"""
+
+    except Exception as exc:
+        directory_panel = f"""
+<div class="card">
+  <h2>Path-ID-Auflösung</h2>
+  <div class="message error">
+    Directory-Status konnte nicht ermittelt werden: {esc(exc)}
+  </div>
+</div>
+"""
 
     body = f"""
 {msg_html}
@@ -3881,6 +5087,8 @@ def form_page(
     <button type="submit">Report erzeugen</button>
   </form>
 </div>
+
+{directory_panel}
 """
     return page("Repeater Report", body, config=config, site_key=config.get("site_key"))
 
@@ -3914,6 +5122,9 @@ def mesh_form_page(
             "max_geo_distance_km": config.get("max_geo_distance_km", 500.0),
             "date_from": map_from,
             "date_to": map_to,
+            "role_counts": {},
+            "role_geo_counts": {},
+            "role_rejected_counts": {},
         }
 
     mesh_site_name = (
@@ -3927,6 +5138,23 @@ def mesh_form_page(
         if mesh_receiver_name
         and rr.norm(mesh_site_name) != rr.norm(mesh_receiver_name)
         else ""
+    )
+
+    role_counts = mesh_map_summary.get("role_counts") or {}
+    role_geo_counts = mesh_map_summary.get("role_geo_counts") or {}
+    role_rejected_counts = mesh_map_summary.get("role_rejected_counts") or {}
+    role_order = [r for r in ("repeater","companion","room_server","sensor","unknown") if r in role_counts]
+    role_order += sorted(r for r in role_counts if r not in role_order)
+    role_summary_rows = "".join(
+        f"""
+        <tr>
+          <td>{esc(_mesh_role_label(role))}</td>
+          <td class="num">{esc(role_counts.get(role, 0))}</td>
+          <td class="num">{esc(role_geo_counts.get(role, 0))}</td>
+          <td class="num">{esc(role_rejected_counts.get(role, 0))}</td>
+        </tr>
+        """
+        for role in role_order
     )
 
     body = f"""
@@ -3979,14 +5207,35 @@ def mesh_form_page(
       <strong>{esc(mesh_map_summary['repeaters'])}</strong>
     </div>
     <div class="mesh-overview-fact">
-      <span class="fact-label">Mit plausiblen Koordinaten</span>
+      <span class="fact-label">Repeater mit Koordinaten</span>
       <strong>{esc(mesh_map_summary['geo_repeaters'])}</strong>
     </div>
     <div class="mesh-overview-fact">
-      <span class="fact-label">Positionen ausgefiltert</span>
+      <span class="fact-label">Repeater ausgefiltert</span>
       <strong>{esc(mesh_map_summary['rejected_geo'])}</strong>
     </div>
   </div>
+
+  <details class="mesh-role-summary" style="margin:0 0 14px">
+    <summary><strong>Beobachtete Node-Rollen</strong></summary>
+    <div class="help" style="margin:8px 0">
+      Zusätzliche Rollen stammen aus den Kontaktbeobachtungen der letzten 28 Tage.
+      Repeater sind in der Karte standardmäßig sichtbar; weitere Rollen können
+      bei Bedarf eingeblendet werden.
+    </div>
+    <table class="neighbor-advert-table">
+      <thead>
+        <tr>
+          <th>Rolle</th>
+          <th class="num">Beobachtet</th>
+          <th class="num">Mit Koordinaten</th>
+          <th class="num">Ausgefiltert</th>
+        </tr>
+      </thead>
+      <tbody>{role_summary_rows}</tbody>
+    </table>
+  </details>
+
   <div class="help" style="margin:-4px 0 12px">
     Kartenfilter: maximal {esc(mesh_map_summary['max_geo_distance_km'])} km Entfernung
     zum Beobachtungsstandort. Rohkoordinaten in QuestDB bleiben erhalten.
@@ -4292,7 +5541,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/report":
-                self.send_html(form_page(config))
+                query = urllib.parse.parse_qs(
+                    parsed.query,
+                    keep_blank_values=True,
+                )
+                message = query.get("message", [""])[-1]
+                error = query.get("error", ["0"])[-1] == "1"
+                self.send_html(
+                    form_page(
+                        config,
+                        message=message,
+                        error=error,
+                    )
+                )
                 return
 
             if path == "/mesh":
@@ -4466,6 +5727,93 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError("Unbekannte Aktion.")
 
                 self.redirect(site_url("/", current_site, message=message))
+                return
+
+            if path == "/directory-refresh-all":
+                pending = uncached_path_ids(config, days=7, limit=None)
+                selected_ids = [item["path_id"] for item in pending]
+                if not selected_ids:
+                    self.redirect(site_url("/report", current_site, message="Keine ungeprüften Path-IDs vorhanden."))
+                    return
+                results = refresh_directory_path_ids(selected_ids)
+                unique = sum(1 for item in results if item["status"] == "directory_unique")
+                ambiguous = sum(1 for item in results if item["status"] == "directory_ambiguous")
+                unresolved = sum(1 for item in results if item["status"] == "unresolved")
+                lookup_errors = sum(1 for item in results if item["status"] == "lookup_error")
+                errors = [item for item in results if item["status"] == "error"]
+                message = (
+                    f"Alle ungeprüften Path-IDs geprüft ({len(selected_ids)}): "
+                    f"{unique} eindeutig, {ambiguous} mehrdeutig, "
+                    f"{unresolved} ohne Treffer, {lookup_errors} Online-Fehler"
+                )
+                if errors:
+                    message += f", {len(errors)} interne Fehler."
+                self.redirect(site_url(
+                    "/report", current_site, message=message,
+                    error=1 if (errors or lookup_errors) else None,
+                ))
+                return
+
+            if path == "/directory-refresh":
+                pending = uncached_path_ids(
+                    config,
+                    days=7,
+                    limit=50,
+                )
+                selected_ids = [
+                    item["path_id"]
+                    for item in pending
+                ]
+
+                if not selected_ids:
+                    self.redirect(
+                        site_url(
+                            "/report",
+                            current_site,
+                            message="Keine ungeprüften Path-IDs vorhanden.",
+                        )
+                    )
+                    return
+
+                results = refresh_directory_path_ids(selected_ids)
+
+                unique = sum(
+                    1 for item in results
+                    if item["status"] == "directory_unique"
+                )
+                ambiguous = sum(
+                    1 for item in results
+                    if item["status"] == "directory_ambiguous"
+                )
+                unresolved = sum(
+                    1 for item in results
+                    if item["status"] == "unresolved"
+                )
+                lookup_errors = sum(
+                    1 for item in results
+                    if item["status"] == "lookup_error"
+                )
+                errors = [
+                    item for item in results
+                    if item["status"] == "error"
+                ]
+
+                message = (
+                    f"Node Directory aktualisiert: {unique} eindeutig, "
+                    f"{ambiguous} mehrdeutig, {unresolved} ohne Treffer, "
+                    f"{lookup_errors} Online-Fehler"
+                )
+                if errors:
+                    message += f", {len(errors)} interne Fehler."
+
+                self.redirect(
+                    site_url(
+                        "/report",
+                        current_site,
+                        message=message,
+                        error=1 if (errors or lookup_errors) else None,
+                    )
+                )
                 return
 
             if path == "/generate-mesh":

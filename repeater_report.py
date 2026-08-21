@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap - Repeater Report v0.51
+MeshCore PacketTap - Repeater Report v0.59
 =========================================
 
 Direkt auf das dokumentierte QuestDB-Datenmodell von meshcore-packettap
@@ -59,6 +59,10 @@ Wichtige Definitionen
 
 Abhängigkeiten:
     Nur Python-Standardbibliothek.
+    Optional: state/node_directory.db aus node_directory.py.
+    Der Report greift ausschließlich lesend darauf zu und führt keine
+    Online-Abfragen aus. Die SQLite-Verbindung wird pro Report nur einmal
+    geöffnet; wiederholte Path-ID-Lookups werden zusätzlich im RAM gecacht.
 
 Beispiel PowerShell:
     python .\\repeater_report.py `
@@ -80,6 +84,7 @@ import argparse
 import html
 import json
 import re
+import sqlite3
 import sys
 import urllib.parse
 import urllib.request
@@ -115,6 +120,8 @@ class Contact:
     contact_type: str
     node_role: str
     source_type: str
+    adv_lat: float | None = None
+    adv_lon: float | None = None
 
 
 @dataclass
@@ -127,6 +134,11 @@ class NeighborInfo:
     unscoped_gt3_packets: int = 0
     ambiguous: bool = False
     candidates: int = 0
+    resolution_source: str = "mc_contacts"
+    resolution_status: str = "local"
+    plausibility_score: int | None = None
+    plausibility_gap: int | None = None
+    plausibility_reason: str = ""
 
 
 @dataclass
@@ -212,6 +224,25 @@ def fmt_pct(value: float) -> str:
     return f"{value:.1f}".replace(".", ",") + " %"
 
 
+def directory_source_display(value: str | None) -> str:
+    mapping = {
+        "corescope": "analyzer.meshcorenetz.de",
+        "meshcore_map": "map.meshcore.dev",
+        "manual": "manuell",
+    }
+    parts = [
+        part.strip()
+        for part in str(value or "").split("+")
+        if part.strip()
+    ]
+    if not parts:
+        return "externes Directory"
+    return " + ".join(
+        mapping.get(part, part)
+        for part in parts
+    )
+
+
 def esc(value: Any) -> str:
     return html.escape(str(value))
 
@@ -248,6 +279,26 @@ def is_full_public_key(value: str) -> bool:
 
 def route_type(row: dict[str, Any]) -> int | None:
     return to_int(row.get("payload_route_type"))
+
+
+def haversine_km(
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+) -> float:
+    import math
+
+    radius_km = 6371.0088
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
+    )
+    return radius_km * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def hop_at_repeater(
@@ -437,7 +488,13 @@ def load_contacts(db: QuestDB) -> list[Contact]:
         )
 
     optional = [
-        c for c in ("contact_type", "source_type")
+        c
+        for c in (
+            "contact_type",
+            "source_type",
+            "adv_lat",
+            "adv_lon",
+        )
         if c in available
     ]
 
@@ -470,6 +527,16 @@ def load_contacts(db: QuestDB) -> list[Contact]:
             contact_type=text_value(row.get("contact_type")),
             node_role=norm(row.get("node_role")),
             source_type=norm(row.get("source_type")),
+            adv_lat=(
+                float(row.get("adv_lat"))
+                if row.get("adv_lat") not in (None, "")
+                else None
+            ),
+            adv_lon=(
+                float(row.get("adv_lon"))
+                if row.get("adv_lon") not in (None, "")
+                else None
+            ),
         )
 
     return list(latest.values())
@@ -595,9 +662,180 @@ def load_adverts(
 # Contact / path resolution
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class DirectoryCandidate:
+    public_key: str
+    name: str
+    node_role: str
+    lat: float | None
+    lon: float | None
+    source: str
+
+
+@dataclass(frozen=True)
+class DirectoryResolution:
+    path_id: str
+    status: str
+    candidates: tuple[DirectoryCandidate, ...]
+
+
+@dataclass(frozen=True)
+class DirectoryPlausibility:
+    candidate: DirectoryCandidate
+    score: int
+    reasons: tuple[str, ...]
+    distance_km: float | None
+    predecessor_distance_km: float | None = None
+    successor_distance_km: float | None = None
+
+
+class NodeDirectoryCache:
+    """
+    Read-only access to state/node_directory.db.
+
+    Performance characteristics:
+    - SQLite connection is opened at most once per resolver/report
+    - each Path-ID result is cached in memory for the lifetime of the resolver
+    - no network access
+    - no writes
+    - missing/invalid DB simply behaves like an empty directory
+    """
+
+    def __init__(self, db_path: str | Path | None):
+        self.db_path = Path(db_path) if db_path else None
+        self._conn: sqlite3.Connection | None = None
+        self._open_attempted = False
+        self._memory_cache: dict[str, DirectoryResolution] = {}
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def __del__(self) -> None:
+        self.close()
+
+    def _connection(self) -> sqlite3.Connection | None:
+        if self._conn is not None:
+            return self._conn
+
+        if self._open_attempted:
+            return None
+
+        self._open_attempted = True
+
+        if self.db_path is None or not self.db_path.exists():
+            return None
+
+        try:
+            conn = sqlite3.connect(
+                f"file:{self.db_path.resolve()}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            self._conn = conn
+            return conn
+        except Exception:
+            self._conn = None
+            return None
+
+    def lookup(self, path_id: str) -> DirectoryResolution:
+        pid = norm(path_id)
+
+        if not pid:
+            return DirectoryResolution(pid, "not_cached", ())
+
+        cached = self._memory_cache.get(pid)
+        if cached is not None:
+            return cached
+
+        conn = self._connection()
+        if conn is None:
+            result = DirectoryResolution(pid, "not_cached", ())
+            self._memory_cache[pid] = result
+            return result
+
+        try:
+            cache = conn.execute(
+                """
+                SELECT status, candidate_count, expires_at
+                FROM path_lookup_cache
+                WHERE path_id = ?
+                """,
+                (pid,),
+            ).fetchone()
+
+            if cache is None:
+                result = DirectoryResolution(pid, "not_cached", ())
+                self._memory_cache[pid] = result
+                return result
+
+            # Expired cache entries are intentionally not used by reports.
+            import time
+            if int(cache["expires_at"] or 0) < int(time.time()):
+                result = DirectoryResolution(pid, "expired", ())
+                self._memory_cache[pid] = result
+                return result
+
+            rows = conn.execute(
+                """
+                SELECT
+                    n.public_key,
+                    n.node_name,
+                    n.node_role,
+                    n.lat,
+                    n.lon,
+                    n.source
+                FROM path_candidates pc
+                JOIN nodes n
+                  ON n.public_key = pc.public_key
+                WHERE pc.path_id = ?
+                ORDER BY
+                    lower(COALESCE(n.node_name, '')),
+                    n.public_key
+                """,
+                (pid,),
+            ).fetchall()
+
+            candidates = tuple(
+                DirectoryCandidate(
+                    public_key=norm(row["public_key"]),
+                    name=text_value(row["node_name"]),
+                    node_role=norm(row["node_role"]),
+                    lat=row["lat"],
+                    lon=row["lon"],
+                    source=text_value(row["source"]) or "directory",
+                )
+                for row in rows
+                if is_full_public_key(text_value(row["public_key"]))
+            )
+
+            result = DirectoryResolution(
+                path_id=pid,
+                status=text_value(cache["status"]) or "unresolved",
+                candidates=candidates,
+            )
+            self._memory_cache[pid] = result
+            return result
+
+        except sqlite3.Error:
+            result = DirectoryResolution(pid, "not_cached", ())
+            self._memory_cache[pid] = result
+            return result
+
+
 class ContactResolver:
-    def __init__(self, contacts: list[Contact]):
+    def __init__(
+        self,
+        contacts: list[Contact],
+        node_directory_db: str | Path | None = None,
+    ):
         self.contacts = contacts
+        self.node_directory = NodeDirectoryCache(node_directory_db)
         self.repeaters = [
             c for c in contacts
             if c.node_role == "repeater"
@@ -614,6 +852,276 @@ class ContactResolver:
             for byte_len in range(1, 9):
                 hex_len = byte_len * 2
                 self.prefix_index[hex_len][c.public_key[:hex_len]].append(c)
+
+    def observer_contact(
+        self,
+        observer_id: str | None,
+    ) -> Contact | None:
+        return self.by_key.get(norm(observer_id)) if observer_id else None
+
+    def contact_geo(
+        self,
+        contact: Contact | None,
+    ) -> tuple[float, float] | None:
+        if (
+            contact is None
+            or contact.adv_lat is None
+            or contact.adv_lon is None
+        ):
+            return None
+        return float(contact.adv_lat), float(contact.adv_lon)
+
+    def resolve_path_geo_unique(
+        self,
+        path_id: str,
+        path_hash_size: int | None,
+    ) -> tuple[float, float] | None:
+        """
+        Resolve a path hop only when it is unambiguous.
+
+        Priority:
+        1. local mc_contacts
+        2. directory_unique
+
+        directory_probable is intentionally NOT chained as path context in
+        v1.1, so one heuristic result cannot automatically cause another.
+        """
+        pid = norm(path_id)
+        if not pid:
+            return None
+
+        local = self.resolve_path_id(pid, path_hash_size)
+        if len(local) == 1:
+            return self.contact_geo(local[0])
+
+        directory = self.resolve_directory_path_id(pid)
+        if (
+            directory.status == "directory_unique"
+            and len(directory.candidates) == 1
+        ):
+            candidate = directory.candidates[0]
+            if candidate.lat is not None and candidate.lon is not None:
+                return float(candidate.lat), float(candidate.lon)
+
+        return None
+
+    @staticmethod
+    def _median_context_distance(
+        candidate: DirectoryCandidate,
+        points: list[tuple[float, float]],
+    ) -> float | None:
+        if (
+            candidate.lat is None
+            or candidate.lon is None
+            or not points
+        ):
+            return None
+
+        values = [
+            haversine_km(
+                float(candidate.lat),
+                float(candidate.lon),
+                lat,
+                lon,
+            )
+            for lat, lon in points
+        ]
+        if not values:
+            return None
+
+        values.sort()
+        n = len(values)
+        mid = n // 2
+        if n % 2:
+            return values[mid]
+        return (values[mid - 1] + values[mid]) / 2.0
+
+    @staticmethod
+    def _path_distance_score(
+        distance_km: float,
+        label: str,
+    ) -> tuple[int, str]:
+        if distance_km <= 30:
+            return 60, f"{label} {distance_km:.0f} km +60"
+        if distance_km <= 60:
+            return 50, f"{label} {distance_km:.0f} km +50"
+        if distance_km <= 100:
+            return 40, f"{label} {distance_km:.0f} km +40"
+        if distance_km <= 200:
+            return 20, f"{label} {distance_km:.0f} km +20"
+        if distance_km <= 350:
+            return 10, f"{label} {distance_km:.0f} km +10"
+        if distance_km > 500:
+            return -40, f"{label} {distance_km:.0f} km -40"
+        return 0, f"{label} {distance_km:.0f} km +0"
+
+    def score_directory_candidates(
+        self,
+        resolution: DirectoryResolution,
+        observer_id: str | None,
+        max_geo_distance_km: float = 500.0,
+        predecessor_points: list[tuple[float, float]] | None = None,
+        successor_points: list[tuple[float, float]] | None = None,
+    ) -> list[DirectoryPlausibility]:
+        """
+        Plausibility v1.1.
+
+        Ranking order:
+        - local full-key evidence
+        - repeater role
+        - distance to known path predecessor
+        - distance to known path successor
+        - only then distance to observation site
+
+        Only locally unique or directory_unique hops are used as path context.
+        """
+        predecessor_points = predecessor_points or []
+        successor_points = successor_points or []
+
+        observer = self.observer_contact(observer_id)
+        observer_has_geo = (
+            observer is not None
+            and observer.adv_lat is not None
+            and observer.adv_lon is not None
+        )
+
+        scored: list[DirectoryPlausibility] = []
+
+        for candidate in resolution.candidates:
+            score = 0
+            reasons: list[str] = []
+            distance_km: float | None = None
+
+            if candidate.public_key in self.by_key:
+                score += 60
+                reasons.append("Full Public Key lokal beobachtet +60")
+
+            if candidate.node_role == "repeater":
+                score += 30
+                reasons.append("Rolle Repeater +30")
+            elif candidate.node_role in ("companion", "room_server"):
+                score -= 20
+                reasons.append(f"Rolle {candidate.node_role} -20")
+
+            predecessor_distance = self._median_context_distance(
+                candidate,
+                predecessor_points,
+            )
+            if predecessor_distance is not None:
+                points, reason = self._path_distance_score(
+                    predecessor_distance,
+                    "Vorgänger",
+                )
+                score += points
+                reasons.append(reason)
+
+            successor_distance = self._median_context_distance(
+                candidate,
+                successor_points,
+            )
+            if successor_distance is not None:
+                points, reason = self._path_distance_score(
+                    successor_distance,
+                    "Nachfolger",
+                )
+                score += points
+                reasons.append(reason)
+
+            # Observation-site distance is deliberately weaker than path context.
+            if (
+                observer_has_geo
+                and candidate.lat is not None
+                and candidate.lon is not None
+            ):
+                distance_km = haversine_km(
+                    float(observer.adv_lat),
+                    float(observer.adv_lon),
+                    float(candidate.lat),
+                    float(candidate.lon),
+                )
+
+                if (
+                    max_geo_distance_km > 0
+                    and distance_km > max_geo_distance_km
+                ):
+                    score -= 40
+                    reasons.append(
+                        f"Standort {distance_km:.0f} km > Kartenradius -40"
+                    )
+                elif distance_km <= 50:
+                    score += 20
+                    reasons.append(f"Standort {distance_km:.0f} km +20")
+                elif distance_km <= 100:
+                    score += 15
+                    reasons.append(f"Standort {distance_km:.0f} km +15")
+                elif distance_km <= 200:
+                    score += 10
+                    reasons.append(f"Standort {distance_km:.0f} km +10")
+                elif distance_km <= 500:
+                    score += 5
+                    reasons.append(f"Standort {distance_km:.0f} km +5")
+
+            scored.append(
+                DirectoryPlausibility(
+                    candidate=candidate,
+                    score=score,
+                    reasons=tuple(reasons),
+                    distance_km=distance_km,
+                    predecessor_distance_km=predecessor_distance,
+                    successor_distance_km=successor_distance,
+                )
+            )
+
+        scored.sort(
+            key=lambda item: (
+                -item.score,
+                item.predecessor_distance_km
+                if item.predecessor_distance_km is not None
+                else float("inf"),
+                item.successor_distance_km
+                if item.successor_distance_km is not None
+                else float("inf"),
+                item.distance_km
+                if item.distance_km is not None
+                else float("inf"),
+                (item.candidate.name or "").lower(),
+                item.candidate.public_key,
+            )
+        )
+        return scored
+
+    def probable_directory_candidate(
+        self,
+        resolution: DirectoryResolution,
+        observer_id: str | None,
+        max_geo_distance_km: float = 500.0,
+        predecessor_points: list[tuple[float, float]] | None = None,
+        successor_points: list[tuple[float, float]] | None = None,
+    ) -> tuple[DirectoryPlausibility | None, int | None]:
+        scored = self.score_directory_candidates(
+            resolution,
+            observer_id,
+            max_geo_distance_km,
+            predecessor_points=predecessor_points,
+            successor_points=successor_points,
+        )
+        if not scored:
+            return None, None
+
+        best = scored[0]
+        second_score = scored[1].score if len(scored) > 1 else None
+        gap = best.score - second_score if second_score is not None else None
+
+        # v1.1 remains conservative: a high total score plus a clear lead.
+        if best.score >= 90 and (
+            second_score is None or (gap is not None and gap >= 25)
+        ):
+            return best, gap
+
+        return None, gap
+
+    def close(self) -> None:
+        self.node_directory.close()
 
     def exact(self, public_key: str) -> Contact | None:
         return self.by_key.get(norm(public_key))
@@ -692,6 +1200,18 @@ class ContactResolver:
             pass
 
         return self.prefix_index[len(pid)].get(pid, [])
+
+    def resolve_directory_path_id(
+        self,
+        path_id: str,
+    ) -> DirectoryResolution:
+        """
+        Resolve only against the local node_directory.db cache.
+
+        Local mc_contacts always has priority and must be checked first by
+        callers. This method never performs network access.
+        """
+        return self.node_directory.lookup(path_id)
 
     def unique_repeaters_in_packet(
         self,
@@ -976,6 +1496,8 @@ def build_neighbors(
     repeater_rows: list[dict[str, Any]],
     selected_key: str,
     resolver: ContactResolver,
+    observer_id: str | None = None,
+    max_geo_distance_km: float = 500.0,
 ) -> list[NeighborInfo]:
     result: dict[str, NeighborInfo] = {}
 
@@ -986,15 +1508,53 @@ def build_neighbors(
         repeater_hops = hop_at_repeater(row, selected_key, resolver)
         rt = route_type(row)
 
-        previous_ids: set[str] = set()
-        for pos in positions:
-            # A neighbor for this report is strictly the repeater/node that
-            # appears immediately BEFORE the selected repeater in the path.
-            if pos > 0:
-                previous_ids.add(nodes[pos - 1])
+        path_contexts: dict[
+            str,
+            dict[str, list[tuple[float, float]]],
+        ] = defaultdict(
+            lambda: {
+                "predecessor": [],
+                "successor": [],
+            }
+        )
 
-        for path_id in previous_ids:
+        selected_contact = resolver.exact(selected_key)
+        selected_geo = resolver.contact_geo(selected_contact)
+
+        for pos in positions:
+            # A neighbor for this report is strictly the node immediately
+            # BEFORE the selected repeater in the observed path.
+            if pos <= 0:
+                continue
+
+            path_id = nodes[pos - 1]
+            context = path_contexts[path_id]
+
+            # Path predecessor of the unknown/resolved neighbor.
+            if pos - 2 >= 0:
+                predecessor_id = nodes[pos - 2]
+                predecessor_geo = resolver.resolve_path_geo_unique(
+                    predecessor_id,
+                    size,
+                )
+                if (
+                    predecessor_geo is not None
+                    and predecessor_geo not in context["predecessor"]
+                ):
+                    context["predecessor"].append(predecessor_geo)
+
+            # Path successor is the selected repeater itself for this report.
+            if (
+                selected_geo is not None
+                and selected_geo not in context["successor"]
+            ):
+                context["successor"].append(selected_geo)
+
+        for path_id, context in path_contexts.items():
             matches = resolver.resolve_path_id(path_id, size)
+            plausibility_score = None
+            plausibility_gap = None
+            plausibility_reason = ""
 
             if len(matches) == 1:
                 contact = matches[0]
@@ -1011,11 +1571,77 @@ def build_neighbors(
                 ambiguous = True
                 candidates = len(matches)
             else:
-                identity = f"unknown:{path_id}"
-                public_key = path_id
-                name = "–"
-                ambiguous = False
-                candidates = 0
+                directory = resolver.resolve_directory_path_id(path_id)
+
+                if (
+                    directory.status == "directory_unique"
+                    and len(directory.candidates) == 1
+                ):
+                    candidate = directory.candidates[0]
+                    identity = f"directory:{candidate.public_key}"
+                    public_key = candidate.public_key
+                    name = candidate.name or "–"
+                    ambiguous = False
+                    candidates = 1
+                    resolution_source = candidate.source or "directory"
+                    resolution_status = "directory_unique"
+
+                elif (
+                    directory.status == "directory_ambiguous"
+                    and len(directory.candidates) > 1
+                ):
+                    probable, score_gap = resolver.probable_directory_candidate(
+                        directory,
+                        observer_id,
+                        max_geo_distance_km,
+                        predecessor_points=context["predecessor"],
+                        successor_points=context["successor"],
+                    )
+                    if probable is not None:
+                        candidate = probable.candidate
+                        identity = f"directory-probable:{candidate.public_key}"
+                        public_key = candidate.public_key
+                        name = candidate.name or "–"
+                        ambiguous = False
+                        candidates = len(directory.candidates)
+                        resolution_source = candidate.source or "directory"
+                        resolution_status = "directory_probable"
+                        plausibility_score = probable.score
+                        plausibility_gap = score_gap
+                        plausibility_reason = "; ".join(probable.reasons)
+                    else:
+                        identity = f"directory-ambiguous:{path_id}"
+                        public_key = " / ".join(
+                            c.public_key for c in directory.candidates
+                        )
+                        names = [c.name for c in directory.candidates if c.name]
+                        name = " / ".join(names) if names else "(mehrdeutig)"
+                        ambiguous = True
+                        candidates = len(directory.candidates)
+                        resolution_source = "directory"
+                        resolution_status = "directory_ambiguous"
+                        plausibility_gap = score_gap
+
+                else:
+                    identity = f"unknown:{path_id}"
+                    public_key = path_id
+                    name = "–"
+                    ambiguous = False
+                    candidates = 0
+                    resolution_source = (
+                        "directory"
+                        if directory.status == "unresolved"
+                        else "mc_contacts"
+                    )
+                    resolution_status = directory.status
+
+            if len(matches) >= 1:
+                resolution_source = "mc_contacts"
+                resolution_status = (
+                    "local_unique"
+                    if len(matches) == 1
+                    else "local_ambiguous"
+                )
 
             info = result.get(identity)
             if info is None:
@@ -1025,6 +1651,11 @@ def build_neighbors(
                     name=name,
                     ambiguous=ambiguous,
                     candidates=candidates,
+                    resolution_source=resolution_source,
+                    resolution_status=resolution_status,
+                    plausibility_score=plausibility_score,
+                    plausibility_gap=plausibility_gap,
+                    plausibility_reason=plausibility_reason,
                 )
                 result[identity] = info
 
@@ -1059,9 +1690,14 @@ def analyze(
     period_to: str,
     receiver_id: str | None,
     receiver_name: str | None,
+    node_directory_db: str | Path | None = None,
+    max_geo_distance_km: float = 500.0,
 ) -> tuple[Metrics, list[NeighborInfo], list[NeighborInfo], list[tuple[str, int]]]:
 
-    resolver = ContactResolver(contacts)
+    resolver = ContactResolver(
+        contacts,
+        node_directory_db=node_directory_db,
+    )
 
     observer_name, observer_id = determine_observer(
         observations,
@@ -1119,6 +1755,8 @@ def analyze(
         repeater_rows,
         selected.public_key,
         resolver,
+        observer_id=observer_id,
+        max_geo_distance_km=max_geo_distance_km,
     )
     neighbors_gt3 = [
         n for n in neighbors
@@ -1221,10 +1859,29 @@ def neighbor_table(
                 f"{n.candidates}-fach mehrdeutig.</div>"
             )
         elif n.candidates == 0:
+            if n.resolution_status == "unresolved":
+                note = (
+                    f"<div class='muted small'>Path-ID {esc(n.path_id)} "
+                    "ist auch im lokalen Node-Directory-Cache unaufgelöst.</div>"
+                )
+            else:
+                note = (
+                    f"<div class='muted small'>Path-ID {esc(n.path_id)} "
+                    "konnte keinem bekannten Repeater eindeutig "
+                    "zugeordnet werden.</div>"
+                )
+        elif n.resolution_status == "directory_probable":
             note = (
-                f"<div class='muted small'>Path-ID {esc(n.path_id)} "
-                "konnte keinem bekannten Repeater eindeutig "
-                "zugeordnet werden.</div>"
+                "<div class='muted small'>"
+                f"Wahrscheinliche Directory-Zuordnung aus {n.candidates} Kandidaten."
+                "</div>"
+            )
+        elif n.resolution_status == "directory_unique":
+            note = (
+                "<div class='muted small'>"
+                "Zuordnung aus externem Node-Directory-Cache "
+                f"({esc(directory_source_display(n.resolution_source))}), nicht aus mc_contacts."
+                "</div>"
             )
 
         body.append(
@@ -1700,7 +2357,13 @@ def render_html(
             if n.ambiguous:
                 note = (
                     f"<div class='warn'>Path-ID {esc(n.path_id)} ist "
-                    f"{n.candidates}-fach mehrdeutig.</div>"
+                    f"{n.candidates}-fach mehrdeutig"
+                    + (
+                        " (externer Node-Directory-Cache)."
+                        if n.resolution_status == "directory_ambiguous"
+                        else "."
+                    )
+                    + "</div>"
                 )
 
                 # Mögliche Repeater nicht inline, sondern jeweils in eigener Zeile.
@@ -1725,12 +2388,34 @@ def render_html(
                 display_key = esc(n.path_id)
 
             elif n.candidates == 0:
-                note = (
-                    f"<div class='muted small'>Path-ID {esc(n.path_id)} "
-                    "konnte keinem bekannten Repeater eindeutig zugeordnet "
-                    "werden.</div>"
-                )
+                if n.resolution_status == "unresolved":
+                    note = (
+                        f"<div class='muted small'>Path-ID {esc(n.path_id)} "
+                        "ist auch im lokalen Node-Directory-Cache unaufgelöst."
+                        "</div>"
+                    )
+                else:
+                    note = (
+                        f"<div class='muted small'>Path-ID {esc(n.path_id)} "
+                        "konnte keinem bekannten Repeater eindeutig zugeordnet "
+                        "werden.</div>"
+                    )
                 display_key = esc(n.path_id)
+
+            elif n.resolution_status == "directory_probable":
+                note = (
+                    "<div class='muted small'>"
+                    f"Wahrscheinliche Directory-Zuordnung aus {n.candidates} Kandidaten."
+                    "</div>"
+                )
+
+            elif n.resolution_status == "directory_unique":
+                note = (
+                    "<div class='muted small'>"
+                    "Externe Directory-Zuordnung "
+                    f"({esc(directory_source_display(n.resolution_source))}); nicht lokal per ADVERT "
+                    "beobachtet.</div>"
+                )
 
             neighbor_rows.append(
                 "<tr>"
@@ -2654,14 +3339,7 @@ summary {{
       Länge des später vollständig beobachteten Pfades.
     </p>
 
-    <p class="small muted">
-      <strong>Path-Hash-Auswertung:</strong>
-      Für die Zuordnung eines Pakets zu einem Repeater wird die im Paket
-      verwendete Path-Hash-Länge berücksichtigt. 1-, 2- und 3-Byte-Path-Hashes
-      werden ausgewertet. Ein Paket wird dem untersuchten Repeater jedoch nur
-      dann zugerechnet, wenn der verwendete Public-Key-Präfix unter den bekannten
-      Repeatern eindeutig ist. Mehrdeutige Präfixe werden nicht berücksichtigt.
-    </p>
+    <p class="small muted"><strong>Path-Hash-Auswertung:</strong> Path-IDs werden zunächst gegen lokal bekannte Kontakte aufgelöst. Für lokal unbekannte Path-IDs kann zusätzlich das externe Node-Verzeichnis von CoreScope (analyzer.meshcorenetz.de) abgefragt werden. Eindeutige Treffer werden direkt ergänzt; bei mehreren Kandidaten kann eine plausible Zuordnung anhand des bekannten Pfadkontexts erfolgen. Externe bzw. heuristische Zuordnungen werden im Report entsprechend gekennzeichnet.</p>
 
     <p class="small muted">
       <strong>Beobachtete Mesh-Größe:</strong>
@@ -2779,6 +3457,27 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument(
+        "--max-geo-distance-km",
+        type=float,
+        default=500.0,
+        help=(
+            "Maximale plausible Entfernung zum Beobachtungsstandort für "
+            "Directory-Kandidaten (Standard 500 km; Pfad-Vorgänger und "
+            "Pfad-Nachfolger werden unabhängig davon stärker gewichtet)."
+        ),
+    )
+
+    p.add_argument(
+        "--node-directory-db",
+        default="state/node_directory.db",
+        help=(
+            "Optionaler lokaler SQLite Node-Directory-Cache "
+            "(Standard: state/node_directory.db). "
+            "Der Report führt niemals Online-Abfragen aus."
+        ),
+    )
+
+    p.add_argument(
         "--output",
         default="repeater_report.html",
         help="HTML-Ausgabedatei",
@@ -2811,7 +3510,10 @@ def main() -> int:
 
         print("[REPORT] Lade mc_contacts ...")
         contacts = load_contacts(db)
-        resolver = ContactResolver(contacts)
+        resolver = ContactResolver(
+            contacts,
+            node_directory_db=args.node_directory_db,
+        )
         print(
             f"[REPORT] {len(contacts)} eindeutige Kontakte, "
             f"{len(resolver.repeaters)} Repeater."
@@ -2859,6 +3561,8 @@ def main() -> int:
             args.period_to,
             args.receiver_id,
             args.receiver_name,
+            args.node_directory_db,
+            args.max_geo_distance_km,
         )
 
         output = Path(args.output)
