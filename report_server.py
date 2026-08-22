@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.66
+MeshCore PacketTap Web UI v0.70
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
@@ -36,7 +36,7 @@ import subprocess
 import shutil
 import time
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from collections import Counter, defaultdict
 from statistics import median
 import math
@@ -53,7 +53,7 @@ import repeater_report as rr
 import mesh_report as mr
 
 
-APP_VERSION = "0.66"
+APP_VERSION = "0.70"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
 MAP_DIR = BASE_DIR / "map"
@@ -63,6 +63,8 @@ NODE_DIRECTORY_DB = BASE_DIR / "state" / "node_directory.db"
 PUBLIC_CHANNELS_FILE = BASE_DIR / "public_channels.json"
 PUBLIC_CHANNEL_KEYS_FILE = BASE_DIR / "public_channel_keys.json"
 PUBLIC_CHANNEL_UPDATE_SCRIPT = BASE_DIR / "update_public_channels.py"
+REGIONS_FILE = BASE_DIR / "regions.json"
+REGION_UPDATE_SCRIPT = BASE_DIR / "update_regions.py"
 
 DEFAULT_CONFIG = {
     "questdb_host": "192.168.1.2",
@@ -251,9 +253,19 @@ def output_dir(config: dict[str, Any]) -> Path:
 
 def normalize_date(value: str, end: bool = False) -> str:
     value = value.strip()
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-        raise RuntimeError("Datum muss im Format JJJJ-MM-TT angegeben werden.")
-    return value + ("T23:59:59Z" if end else "T00:00:00Z")
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return value + ("T23:59:59Z" if end else "T00:00:00Z")
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", value):
+        local_tz = datetime.now().astimezone().tzinfo
+        local_dt = datetime.fromisoformat(value).replace(tzinfo=local_tz)
+        utc_dt = local_dt.astimezone(timezone.utc)
+        return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    raise RuntimeError(
+        "Datum/Zeit muss im Format JJJJ-MM-TT oder JJJJ-MM-TTThh:mm angegeben werden."
+    )
 
 
 def safe_filename(value: str) -> str:
@@ -503,10 +515,37 @@ def default_report_dates() -> tuple[str, str]:
 
 
 def mesh_overview_dates() -> tuple[str, str]:
-    """Return a 28-day inclusive range ending today for the Mesh page map."""
-    today = date.today()
-    start = today - timedelta(days=27)
-    return start.isoformat(), today.isoformat()
+    """Return the last 24 hours in local time for the Mesh dashboard."""
+    now = datetime.now().replace(second=0, microsecond=0)
+    start = now - timedelta(hours=24)
+    return (
+        start.isoformat(timespec="minutes"),
+        now.isoformat(timespec="minutes"),
+    )
+
+
+MESH_RANGE_PRESETS = {
+    "1h": ("1h", timedelta(hours=1)),
+    "3h": ("3h", timedelta(hours=3)),
+    "6h": ("6h", timedelta(hours=6)),
+    "12h": ("12h", timedelta(hours=12)),
+    "24h": ("24h", timedelta(hours=24)),
+    "3d": ("3 Tage", timedelta(days=3)),
+    "7d": ("7 Tage", timedelta(days=7)),
+    "14d": ("14 Tage", timedelta(days=14)),
+    "28d": ("28 Tage", timedelta(days=28)),
+}
+
+
+def mesh_preset_dates(range_key: str) -> tuple[str, str]:
+    if range_key not in MESH_RANGE_PRESETS:
+        raise RuntimeError("Unbekannter Mesh-Zeitraum.")
+    now = datetime.now().replace(second=0, microsecond=0)
+    start = now - MESH_RANGE_PRESETS[range_key][1]
+    return (
+        start.isoformat(timespec="minutes"),
+        now.isoformat(timespec="minutes"),
+    )
 
 
 def _mesh_role_label(role: str) -> str:
@@ -2614,6 +2653,41 @@ button:hover, .button:hover {{ opacity:.88; }}
 }}
 .mesh-period-caption {{
   margin-bottom:12px;
+}}
+.mesh-quick-range {{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+}}
+.mesh-quick-range-label {{
+  color:var(--muted);
+  font-size:.84rem;
+  margin-right:2px;
+}}
+.mesh-range-chip {{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:36px;
+  padding:7px 11px;
+  border:1px solid #aaa;
+  border-radius:999px;
+  background:#fff;
+  color:var(--fg);
+  text-decoration:none;
+  font-size:.86rem;
+  font-weight:700;
+  line-height:1;
+}}
+.mesh-range-chip:hover {{
+  opacity:1;
+  background:var(--soft);
+}}
+.mesh-range-chip.active {{
+  background:#1f1f1f;
+  color:#fff;
+  border-color:#1f1f1f;
 }}
 .mesh-dashboard-card {{
   width:100%;
@@ -5519,6 +5593,7 @@ def mesh_form_page(
     config: dict[str, Any],
     date_from: str | None = None,
     date_to: str | None = None,
+    range_key: str = "",
     message: str = "",
     error: bool = False,
 ) -> bytes:
@@ -5533,16 +5608,17 @@ def mesh_form_page(
     selected_from = date_from or overview_default_from
     selected_to = date_to or overview_default_to
 
-    # Validate dates early. If the user swaps them, normalize to ascending order.
+    # Validate dates/times early. If the user swaps them, normalize ascending.
     try:
-        selected_from_date = date.fromisoformat(selected_from)
-        selected_to_date = date.fromisoformat(selected_to)
-        if selected_from_date > selected_to_date:
+        selected_from_dt = datetime.fromisoformat(selected_from)
+        selected_to_dt = datetime.fromisoformat(selected_to)
+        if selected_from_dt > selected_to_dt:
             selected_from, selected_to = selected_to, selected_from
     except ValueError:
         selected_from, selected_to = overview_default_from, overview_default_to
+        range_key = "24h"
         if not message:
-            message = "Ungültiger Zeitraum – auf die letzten 28 Tage zurückgesetzt."
+            message = "Ungültiger Zeitraum – auf die letzten 24 Stunden zurückgesetzt."
             error = True
         cls = "error"
         msg_html = f'<div class="message {cls}">{esc(message)}</div>'
@@ -5634,6 +5710,16 @@ def mesh_form_page(
         "Top #Channels",
     )
 
+    quick_range_links = []
+    for preset_key, (preset_label, _) in MESH_RANGE_PRESETS.items():
+        active = " active" if preset_key == range_key else ""
+        quick_range_links.append(
+            f'<a class="mesh-range-chip{active}" '
+            f'href="{esc(site_url("/mesh", config.get("site_key", ""), range=preset_key))}">'
+            f'{esc(preset_label)}</a>'
+        )
+    quick_range_html = "".join(quick_range_links)
+
     body = f"""
 {msg_html}
 <section class="mesh-dashboard-head">
@@ -5652,7 +5738,7 @@ def mesh_form_page(
       <label for="mesh-date-from">Auswertung von</label>
       <input
         id="mesh-date-from"
-        type="date"
+        type="datetime-local"
         name="date_from"
         value="{esc(selected_from)}"
         required
@@ -5662,7 +5748,7 @@ def mesh_form_page(
       <label for="mesh-date-to">bis</label>
       <input
         id="mesh-date-to"
-        type="date"
+        type="datetime-local"
         name="date_to"
         value="{esc(selected_to)}"
         required
@@ -5670,10 +5756,10 @@ def mesh_form_page(
     </div>
     <div class="mesh-period-actions">
       <button type="submit">Zeitraum anwenden</button>
-      <a
-        class="button secondary"
-        href="{esc(site_url('/mesh', config.get('site_key', '')))}"
-      >Letzte 28 Tage</a>
+    </div>
+    <div class="mesh-quick-range">
+      <span class="mesh-quick-range-label">Schnellwahl:</span>
+      {quick_range_html}
     </div>
   </form>
 
@@ -5739,7 +5825,7 @@ def mesh_form_page(
     <div>
       <h2>Karte des beobachteten Mesh</h2>
       <div class="help">
-        Langzeitübersicht der letzten 28 Tage, unabhängig vom Report-Zeitraum.
+        Karte für denselben gewählten Zeitraum wie die übrige Mesh-Auswertung.
       </div>
     </div>
   </div>
@@ -5765,7 +5851,7 @@ def mesh_form_page(
   <details class="mesh-role-summary" style="margin:0 0 14px">
     <summary><strong>Beobachtete Node-Rollen</strong></summary>
     <div class="help" style="margin:8px 0">
-      Zusätzliche Rollen stammen aus den Kontaktbeobachtungen der letzten 28 Tage.
+      Zusätzliche Rollen stammen aus den Kontaktbeobachtungen des gewählten Zeitraums.
       Repeater sind in der Karte standardmäßig sichtbar; weitere Rollen können
       bei Bedarf eingeblendet werden.
     </div>
@@ -5939,8 +6025,58 @@ def update_public_channels_via_script(
 
 
 
+
+def region_inventory() -> dict[str, int]:
+    regions = _load_json_list(REGIONS_FILE)
+    return {"regions": len(regions)}
+
+
+def update_regions_via_script() -> dict[str, Any]:
+    if not REGION_UPDATE_SCRIPT.exists():
+        raise RuntimeError(
+            "Region-Update-Skript nicht gefunden: "
+            f"{REGION_UPDATE_SCRIPT}"
+        )
+
+    before = region_inventory()
+    command = [
+        sys.executable,
+        str(REGION_UPDATE_SCRIPT),
+        "--project-dir",
+        str(BASE_DIR),
+        "--apply",
+    ]
+
+    completed = subprocess.run(
+        command,
+        cwd=str(BASE_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+    )
+
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    if completed.returncode != 0:
+        detail = (stderr or stdout or "Unbekannter Fehler").strip()
+        raise RuntimeError("Region-Update fehlgeschlagen: " + detail[-2000:])
+
+    after = region_inventory()
+    return {
+        "before": before,
+        "after": after,
+        "added": max(0, after["regions"] - before["regions"]),
+        "stdout": stdout,
+        "stderr": stderr,
+        "script": str(REGION_UPDATE_SCRIPT),
+    }
+
+
 def settings_page(config: dict[str, Any], message: str = "", error: bool = False) -> bytes:
     channel_inventory = public_channel_inventory()
+    regions_inventory = region_inventory()
     msg_html = ""
     if message:
         msg_html = f'<div class="message {"error" if error else "ok"}">{esc(message)}</div>'
@@ -5988,6 +6124,76 @@ def settings_page(config: dict[str, Any], message: str = "", error: bool = False
 
     body = f"""
 {msg_html}
+<div class="card">
+  <h2>Tools</h2>
+  <h3>Public Channels aktualisieren</h3>
+  <p class="help">
+    Prüft die historischen <span class="mono">GRP_TXT</span>-Pakete aus allen
+    unterschiedlichen QuestDB-Datenbanken der definierten Standorte gegen die
+    Community-Liste <span class="mono">marcelverdult/meshcore-channels</span>.
+    Das Skript <span class="mono">update_public_channels.py</span> aus dem
+    Projekt-Hauptverzeichnis wird einmal mit allen unterschiedlichen
+    QuestDB-Endpunkten gestartet. Die historischen GRP_TXT-Payloads aller
+    Standorte werden vor der MAC-/Decrypt-Verifikation zusammengeführt.
+    Bestehende lokale Einträge bleiben erhalten.
+  </p>
+  <div class="status-grid tools-status-grid">
+    <div class="status-box">
+      <span class="fact-label">#Channels</span>
+      <strong>{esc(channel_inventory["channels"])}</strong>
+    </div>
+    <div class="status-box">
+      <span class="fact-label">Explizite Keys</span>
+      <strong>{esc(channel_inventory["explicit_keys"])}</strong>
+    </div>
+    <div class="status-box">
+      <span class="fact-label">Gesamt</span>
+      <strong>{esc(channel_inventory["total"])}</strong>
+    </div>
+  </div>
+  <form method="post" action="/tools/update-public-channels" class="tool-action-form">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', config['active_site']))}">
+    <button
+      type="submit"
+      onclick="return confirm('Alle definierten QuestDB-Datenbanken auswerten und die lokalen Channel-JSON-Dateien aktualisieren?');"
+    >Public Channels aus allen Standorten aktualisieren</button>
+  </form>
+  <p class="help">
+    Erwarteter Pfad:
+    <span class="mono">C:\\meshcore-packettap\\update_public_channels.py</span>.
+    Das Update-Skript legt seine Sicherungen selbst an. Importer/Analyzer
+    anschließend neu starten, damit deren Channel-Cache neu geladen wird.
+  </p>
+
+  <hr style="border:0;border-top:1px solid var(--line);margin:24px 0">
+
+  <h3>Regionen aktualisieren</h3>
+  <p class="help">
+    Aktualisiert <span class="mono">regions.json</span> aus
+    <span class="mono">marcelverdult/meshcore-regions</span>.
+    Bestehende lokale Einträge bleiben erhalten.
+  </p>
+  <div class="status-grid tools-status-grid">
+    <div class="status-box">
+      <span class="fact-label">Regionen lokal</span>
+      <strong>{esc(regions_inventory["regions"])}</strong>
+    </div>
+  </div>
+  <form method="post" action="/tools/update-regions" class="tool-action-form">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', config['active_site']))}">
+    <button type="submit"
+      onclick="return confirm('regions.json aus marcelverdult/meshcore-regions aktualisieren?');">
+      Regionen aktualisieren
+    </button>
+  </form>
+  <p class="help">
+    Erwarteter Pfad:
+    <span class="mono">C:\\meshcore-packettap\\update_regions.py</span>.
+    Vor dem Schreiben wird <span class="mono">regions.json.bak</span> angelegt.
+    Importer/Analyzer anschließend neu starten, damit deren Region-Cache neu geladen wird.
+  </p>
+</div>
+
 <div class="card">
   <h2>Beobachtungsstandorte</h2>
   <p class="help">
@@ -6041,47 +6247,7 @@ def settings_page(config: dict[str, Any], message: str = "", error: bool = False
   </form>
 </div>
 
-<div class="card">
-  <h2>Tools</h2>
-  <h3>Public Channels aktualisieren</h3>
-  <p class="help">
-    Prüft die historischen <span class="mono">GRP_TXT</span>-Pakete aus allen
-    unterschiedlichen QuestDB-Datenbanken der definierten Standorte gegen die
-    Community-Liste <span class="mono">marcelverdult/meshcore-channels</span>.
-    Das Skript <span class="mono">update_public_channels.py</span> aus dem
-    Projekt-Hauptverzeichnis wird einmal mit allen unterschiedlichen
-    QuestDB-Endpunkten gestartet. Die historischen GRP_TXT-Payloads aller
-    Standorte werden vor der MAC-/Decrypt-Verifikation zusammengeführt.
-    Bestehende lokale Einträge bleiben erhalten.
-  </p>
-  <div class="status-grid tools-status-grid">
-    <div class="status-box">
-      <span class="fact-label">#Channels</span>
-      <strong>{esc(channel_inventory["channels"])}</strong>
-    </div>
-    <div class="status-box">
-      <span class="fact-label">Explizite Keys</span>
-      <strong>{esc(channel_inventory["explicit_keys"])}</strong>
-    </div>
-    <div class="status-box">
-      <span class="fact-label">Gesamt</span>
-      <strong>{esc(channel_inventory["total"])}</strong>
-    </div>
-  </div>
-  <form method="post" action="/tools/update-public-channels" class="tool-action-form">
-    <input type="hidden" name="site" value="{esc(config.get('site_key', config['active_site']))}">
-    <button
-      type="submit"
-      onclick="return confirm('Alle definierten QuestDB-Datenbanken auswerten und die lokalen Channel-JSON-Dateien aktualisieren?');"
-    >Public Channels aus allen Standorten aktualisieren</button>
-  </form>
-  <p class="help">
-    Erwarteter Pfad:
-    <span class="mono">C:\\meshcore-packettap\\update_public_channels.py</span>.
-    Das Update-Skript legt seine Sicherungen selbst an. Importer/Analyzer
-    anschließend neu starten, damit deren Channel-Cache neu geladen wird.
-  </p>
-</div>"""
+"""
     return page("Einstellungen", body, config=config, site_key=config.get("site_key"))
 
 
@@ -6297,8 +6463,15 @@ class Handler(BaseHTTPRequestHandler):
                     parsed.query,
                     keep_blank_values=True,
                 )
+                range_key = query.get("range", [""])[-1].strip().lower()
                 date_from = query.get("date_from", [""])[-1] or None
                 date_to = query.get("date_to", [""])[-1] or None
+
+                if range_key in MESH_RANGE_PRESETS:
+                    date_from, date_to = mesh_preset_dates(range_key)
+                elif not date_from or not date_to:
+                    range_key = "24h"
+
                 message = query.get("message", [""])[-1]
                 error = query.get("error", ["0"])[-1] == "1"
                 self.send_html(
@@ -6306,6 +6479,7 @@ class Handler(BaseHTTPRequestHandler):
                         config,
                         date_from=date_from,
                         date_to=date_to,
+                        range_key=range_key,
                         message=message,
                         error=error,
                     )
@@ -6593,6 +6767,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
 
+            if path == "/tools/update-regions":
+                result = update_regions_via_script()
+                message = (
+                    "Regionen aktualisiert. "
+                    f"Aktuell: {result['after']['regions']} Regionen. "
+                    f"Neu hinzugekommen: {result['added']}."
+                )
+                shown = dict(base_config)
+                shown["site_key"] = current_site
+                self.send_html(settings_page(shown, message, error=False))
+                return
+
             if path == "/tools/update-public-channels":
                 result = update_public_channels_via_script(base_config)
 
@@ -6828,7 +7014,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 config = dict(DEFAULT_CONFIG)
 
-            if path in ("/settings", "/tools/update-public-channels"):
+            if path in ("/settings", "/tools/update-public-channels", "/tools/update-regions"):
                 shown = dict(config)
                 try:
                     shown["site_key"] = current_site
@@ -6840,7 +7026,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/generate-mesh":
                 self.send_html(
-                    mesh_form_page(config, str(exc), error=True),
+                    mesh_form_page(config, message=str(exc), error=True),
                     HTTPStatus.BAD_REQUEST,
                 )
             elif path == "/save-neighbor":
