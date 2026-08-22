@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """Shared MeshCore packet decoding helpers.
 
+Version: 0.2
+
 The functions in this module operate on the raw MeshCore packet bytes carried
 inside PacketTap's ``payload_hex`` field.
+
+v0.2:
+- collision-safe GRP_TXT channel resolution
+- one-byte channel hash is used only as candidate preselection
+- candidate channel keys are verified against the packet's 2-byte HMAC
+- channel names are assigned only for exactly one authenticated candidate
 """
 
 from __future__ import annotations
@@ -14,6 +22,8 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any
+
+APP_VERSION = "0.2"
 
 try:
     from Crypto.Cipher import AES as _PyCryptoAES
@@ -70,14 +80,13 @@ PAYLOAD_TYPE_NAMES = {
     0x0F: "CUSTOM",
 }
 
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PUBLIC_CHANNELS_FILE = os.path.join(BASE_DIR, "public_channels.json")
 PUBLIC_CHANNEL_KEYS_FILE = os.path.join(BASE_DIR, "public_channel_keys.json")
 REGIONS_FILE = os.path.join(BASE_DIR, "regions.json")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-_PUBLIC_CHANNELS_CACHE: dict[str, dict[str, str]] | None = None
+_PUBLIC_CHANNELS_CACHE: dict[str, list[dict[str, str]]] | None = None
 _REGION_NAMES_CACHE: list[str] | None = None
 
 
@@ -114,14 +123,14 @@ def _load_json_file(path: str) -> Any:
 def load_public_channels(
     channels_file: str = PUBLIC_CHANNELS_FILE,
     keys_file: str = PUBLIC_CHANNEL_KEYS_FILE,
-) -> dict[str, dict[str, str]]:
-    """Load derived public channels and explicit channel keys.
+) -> dict[str, list[dict[str, str]]]:
+    """Load channels grouped by their one-byte channel hash.
 
-    ``public_channels.json`` contains a list of names whose keys are derived
-    from the channel name. ``public_channel_keys.json`` contains objects with
-    ``name`` and a 32-character ``key_hex`` value.
+    A one-byte channel hash is not unique. Therefore every hash maps to all
+    configured candidates and GRP_TXT later authenticates each candidate key
+    against the packet's two-byte HMAC.
     """
-    mapping: dict[str, dict[str, str]] = {}
+    mapping: dict[str, list[dict[str, str]]] = {}
 
     def add_channel(name: Any, secret_hex: Any) -> None:
         channel_name = str(name).strip()
@@ -135,11 +144,16 @@ def load_public_channels(
             return
 
         channel_hash = derive_channel_hash_from_secret(secret)
-        if channel_hash:
-            mapping[channel_hash] = {
-                "name": channel_name,
-                "secret_hex": secret,
-            }
+        if not channel_hash:
+            return
+
+        candidate = {
+            "name": channel_name,
+            "secret_hex": secret,
+        }
+        bucket = mapping.setdefault(channel_hash, [])
+        if candidate not in bucket:
+            bucket.append(candidate)
 
     names = _load_json_file(channels_file)
     if isinstance(names, list):
@@ -157,36 +171,52 @@ def load_public_channels(
     return mapping
 
 
-def get_public_channels(*, reload: bool = False) -> dict[str, dict[str, str]]:
-    """Return the cached channel map."""
+def get_public_channels(
+    *,
+    reload: bool = False,
+) -> dict[str, list[dict[str, str]]]:
+    """Return cached channel-hash -> candidate list mapping."""
     global _PUBLIC_CHANNELS_CACHE
     if reload or _PUBLIC_CHANNELS_CACHE is None:
         _PUBLIC_CHANNELS_CACHE = load_public_channels()
     return _PUBLIC_CHANNELS_CACHE
 
 
-def resolve_channel(channel_hash_hex: Any) -> str | None:
-    """Resolve a one-byte channel hash to its configured channel name."""
+def get_channel_candidates(
+    channel_hash_hex: Any,
+) -> list[dict[str, str]]:
+    """Return all configured candidates for a one-byte channel hash."""
     if channel_hash_hex is None:
-        return None
+        return []
     channel_hash = str(channel_hash_hex).strip().lower()
-    info = get_public_channels().get(channel_hash)
-    return info["name"] if info else None
+    return list(get_public_channels().get(channel_hash, []))
+
+
+def resolve_channel(channel_hash_hex: Any) -> str | None:
+    """Resolve by hash only when exactly one candidate exists.
+
+    GRP_TXT does not rely on this shortcut: it authenticates candidate keys
+    using the packet HMAC in decode_grp_txt().
+    """
+    candidates = get_channel_candidates(channel_hash_hex)
+    if len(candidates) != 1:
+        return None
+    return candidates[0]["name"]
 
 
 def get_channel_secret_hex(channel_name: Any) -> str | None:
-    """Return the configured/derived 16-byte key for a channel name."""
+    """Return configured/derived 16-byte key for a channel name."""
     if channel_name is None:
         return None
     wanted = str(channel_name).strip()
     if not wanted:
         return None
 
-    for info in get_public_channels().values():
-        if info["name"] == wanted:
-            return info["secret_hex"]
+    for candidates in get_public_channels().values():
+        for info in candidates:
+            if info["name"] == wanted:
+                return info["secret_hex"]
     return None
-
 
 
 def load_region_names(regions_file: str = REGIONS_FILE) -> list[str]:
@@ -211,6 +241,16 @@ def get_region_names(*, reload: bool = False) -> list[str]:
     if reload or _REGION_NAMES_CACHE is None:
         _REGION_NAMES_CACHE = load_region_names()
     return _REGION_NAMES_CACHE
+
+
+def safe_int(value: Any) -> int | None:
+    """Convert a value to int without raising."""
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def calc_region_key(region_name: Any) -> bytes | None:
@@ -289,8 +329,23 @@ def resolve_region(
             return region_name
     return None
 
+
+def normalize_payload_hex(payload_hex: Any) -> str | None:
+    """Normalize and validate a hexadecimal MeshCore packet string."""
+    if payload_hex is None:
+        return None
+    value = str(payload_hex).strip().lower()
+    if not value or len(value) % 2 != 0:
+        return None
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return None
+    return value
+
+
 def extract_channel_hash(packet_payload_hex: Any) -> str | None:
-    """Extract the first byte of a GRP_TXT/GRP_DATA packet payload."""
+    """Extract first byte of a GRP_TXT/GRP_DATA packet payload."""
     normalized = normalize_payload_hex(packet_payload_hex)
     if normalized is None:
         return None
@@ -304,7 +359,6 @@ def split_grp_txt_sender_and_body(
     """Split ``sender: body`` exactly like the Companion analyzer."""
     if not msg_text:
         return None, None
-
     text = str(msg_text).strip()
     if ": " in text:
         sender, body = text.split(": ", 1)
@@ -342,17 +396,14 @@ def looks_like_human_text(value: Any, min_ratio: float = 0.85) -> bool:
 def decrypt_grp_txt(
     packet_payload_hex: Any,
     channel_name: Any,
+    secret_hex: Any = None,
 ) -> dict[str, Any]:
     """Decrypt a Companion-compatible GRP_TXT packet payload.
 
-    Layout::
-
+    Layout:
         channel_hash (1 byte)
         cipher_mac   (2 bytes)
         ciphertext   (AES-128 ECB, block aligned)
-
-    The plaintext begins with a four-byte little-endian timestamp and one
-    flags byte, followed by UTF-8 ``sender: message`` text.
     """
     result: dict[str, Any] = {
         "ok": False,
@@ -370,7 +421,11 @@ def decrypt_grp_txt(
     }
 
     normalized = normalize_payload_hex(packet_payload_hex)
-    secret_hex = get_channel_secret_hex(channel_name)
+    if secret_hex is None:
+        secret_hex = get_channel_secret_hex(channel_name)
+    else:
+        secret_hex = str(secret_hex).strip().lower()
+
     if normalized is None:
         result["error"] = "invalid_packet_payload"
         return result
@@ -387,7 +442,6 @@ def decrypt_grp_txt(
         key = bytes.fromhex(secret_hex)
         rx_mac = grp_part[1:3]
         ciphertext = grp_part[3:]
-
         result["cipher_mac_hex"] = rx_mac.hex()
 
         if not ciphertext:
@@ -401,13 +455,11 @@ def decrypt_grp_txt(
         result["calc_mac_hex"] = calc_mac.hex()
         result["mac_ok"] = hmac.compare_digest(calc_mac, rx_mac)
 
-        # Do not expose plausible-looking garbage when authentication fails.
         if not result["mac_ok"]:
             result["error"] = "mac_mismatch"
             return result
 
-        plaintext = _aes_ecb_decrypt(key, ciphertext)
-        plaintext = plaintext.rstrip(b"\x00 ")
+        plaintext = _aes_ecb_decrypt(key, ciphertext).rstrip(b"\x00 ")
         result["plaintext_hex"] = plaintext.hex()
 
         if len(plaintext) < 5:
@@ -456,36 +508,12 @@ def decrypt_grp_txt(
         return result
 
 
-def normalize_payload_hex(payload_hex: Any) -> str | None:
-    """Normalize and validate a hexadecimal MeshCore packet string."""
-    if payload_hex is None:
-        return None
-
-    value = str(payload_hex).strip().lower()
-    if not value or len(value) % 2 != 0:
-        return None
-
-    try:
-        bytes.fromhex(value)
-    except ValueError:
-        return None
-
-    return value
-
-
 def short_sha256_hex(value: Any) -> str | None:
-    """Return the first 16 hex characters of SHA-256 for a text value.
-
-    This intentionally matches the existing Companion analyzer, which hashes
-    the normalized hexadecimal string rather than the decoded raw bytes.
-    """
     if value is None:
         return None
-
     text = str(value).strip().lower()
     if not text:
         return None
-
     try:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     except Exception:
@@ -496,42 +524,26 @@ def extract_txt_msg_hashes(
     packet_payload_hex: Any,
     path_hash_size: int = 1,
 ) -> tuple[str | None, str | None]:
-    """Extract destination and source hashes from a TEXT_MSG payload.
-
-    MeshCore TEXT_MSG packet payload::
-
-        destination_hash
-        source_hash
-        MAC + encrypted message data
-
-    Destination and source hashes use the packet's path hash size.
-    """
     normalized = normalize_payload_hex(packet_payload_hex)
     if normalized is None:
         return None, None
-
     try:
         hash_size = int(path_hash_size)
     except (TypeError, ValueError):
         return None, None
-
     if hash_size not in (1, 2, 3):
         return None, None
-
     raw = bytes.fromhex(normalized)
     required_length = 2 * hash_size
-
     if len(raw) < required_length:
         return None, None
-
-    destination_hash = raw[0:hash_size].hex() or None
-    source_hash = raw[hash_size:required_length].hex() or None
-
-    return destination_hash, source_hash
+    return (
+        raw[0:hash_size].hex() or None,
+        raw[hash_size:required_length].hex() or None,
+    )
 
 
 def parse_meshcore_header(payload_hex: Any) -> dict[str, Any] | None:
-    """Parse the MeshCore packet header, transport codes and routing path."""
     normalized = normalize_payload_hex(payload_hex)
     if normalized is None:
         return None
@@ -552,7 +564,6 @@ def parse_meshcore_header(payload_hex: Any) -> dict[str, Any] | None:
     if route_type in (0, 3):
         if len(raw) < index + 4:
             return None
-
         transport1 = raw[index:index + 2][::-1].hex()
         transport2 = raw[index + 2:index + 4][::-1].hex()
         index += 4
@@ -562,18 +573,13 @@ def parse_meshcore_header(payload_hex: Any) -> dict[str, Any] | None:
 
     path_length_byte = raw[index]
     index += 1
-
     path_len = path_length_byte & 0x3F
     path_hash_size_code = (path_length_byte >> 6) & 0x03
-
-    # Codes 0, 1 and 2 represent hash sizes of 1, 2 and 3 bytes.
-    # Code 3 is reserved/unsupported.
     if path_hash_size_code == 3:
         return None
 
     path_hash_size = path_hash_size_code + 1
     path_byte_length = path_len * path_hash_size
-
     if len(raw) < index + path_byte_length:
         return None
 
@@ -581,7 +587,6 @@ def parse_meshcore_header(payload_hex: Any) -> dict[str, Any] | None:
     path_end = path_start + path_byte_length
     path_raw = raw[path_start:path_end]
     packet_payload_raw = raw[path_end:]
-
     path_nodes = [
         path_raw[offset:offset + path_hash_size].hex()
         for offset in range(0, len(path_raw), path_hash_size)
@@ -617,20 +622,13 @@ def parse_meshcore_header(payload_hex: Any) -> dict[str, Any] | None:
 
 
 def decode_packet(payload_hex: Any) -> dict[str, Any] | None:
-    """Decode packet-wide routing and framing fields.
-
-    Payload-specific parsing is delegated to ``decode_payload_metadata``.
-    """
     normalized = normalize_payload_hex(payload_hex)
     if normalized is None:
         return None
-
     header = parse_meshcore_header(normalized)
     if header is None:
         return None
-
     packet_payload_hex = header["packet_payload_hex"]
-
     return {
         "payload_hex": normalized,
         "frame_bytes": header["frame_bytes"],
@@ -655,10 +653,9 @@ def decode_packet(payload_hex: Any) -> dict[str, Any] | None:
 
 
 def decode_text_msg(decoded: dict[str, Any]) -> dict[str, Any]:
-    """Decode metadata specific to a MeshCore TEXT_MSG payload."""
     destination_hash, source_hash = extract_txt_msg_hashes(
-        packet_payload_hex=decoded.get("packet_payload_hex"),
-        path_hash_size=decoded.get("path_hash_size", 1),
+        decoded.get("packet_payload_hex"),
+        decoded.get("path_hash_size", 1),
     )
     return {
         "txt_msg_dest_hash": destination_hash,
@@ -667,14 +664,17 @@ def decode_text_msg(decoded: dict[str, Any]) -> dict[str, Any]:
 
 
 def decode_grp_txt(decoded: dict[str, Any]) -> dict[str, Any]:
-    """Resolve and decrypt a GRP_TXT payload."""
+    """Resolve GRP_TXT using candidate hash + cryptographic MAC check."""
     packet_payload_hex = decoded.get("packet_payload_hex")
     channel_hash_hex = extract_channel_hash(packet_payload_hex)
-    channel_name = resolve_channel(channel_hash_hex)
+    candidates = get_channel_candidates(channel_hash_hex)
 
     result: dict[str, Any] = {
         "channel_hash_hex": channel_hash_hex,
-        "channel_name": channel_name,
+        "channel_name": None,
+        "channel_resolution_status": None,
+        "channel_candidate_count": len(candidates),
+        "channel_mac_match_count": 0,
         "grp_txt_plaintext_hex": None,
         "grp_txt_msg_text": None,
         "grp_txt_msg_timestamp": None,
@@ -685,14 +685,44 @@ def decode_grp_txt(decoded: dict[str, Any]) -> dict[str, Any]:
         "grp_txt_body": None,
     }
 
-    if not channel_name:
-        result["grp_txt_error"] = (
-            "unknown_channel" if channel_hash_hex else "missing_channel_hash"
-        )
+    if not channel_hash_hex:
+        result["channel_resolution_status"] = "missing_hash"
+        result["grp_txt_error"] = "missing_channel_hash"
         return result
 
-    decrypted = decrypt_grp_txt(packet_payload_hex, channel_name)
+    if not candidates:
+        result["channel_resolution_status"] = "unknown"
+        result["grp_txt_error"] = "unknown_channel"
+        return result
+
+    matches: list[tuple[dict[str, str], dict[str, Any]]] = []
+    for candidate in candidates:
+        decrypted = decrypt_grp_txt(
+            packet_payload_hex,
+            candidate["name"],
+            secret_hex=candidate["secret_hex"],
+        )
+        if decrypted.get("mac_ok") is True:
+            matches.append((candidate, decrypted))
+
+    result["channel_mac_match_count"] = len(matches)
+
+    if not matches:
+        result["channel_resolution_status"] = "mac_failed"
+        result["grp_txt_mac_ok"] = False
+        result["grp_txt_error"] = "channel_mac_mismatch"
+        return result
+
+    if len(matches) > 1:
+        result["channel_resolution_status"] = "ambiguous"
+        result["grp_txt_mac_ok"] = True
+        result["grp_txt_error"] = "ambiguous_channel_mac"
+        return result
+
+    candidate, decrypted = matches[0]
     result.update({
+        "channel_name": candidate["name"],
+        "channel_resolution_status": "verified",
         "grp_txt_plaintext_hex": decrypted["plaintext_hex"],
         "grp_txt_msg_text": decrypted["msg_text"],
         "grp_txt_msg_timestamp": decrypted["msg_timestamp"],
@@ -706,23 +736,10 @@ def decode_grp_txt(decoded: dict[str, Any]) -> dict[str, Any]:
 
 
 def decode_grp_data(decoded: dict[str, Any]) -> dict[str, Any]:
-    """Decode GRP_DATA metadata placeholder."""
     return {}
 
 
 def decode_advert(decoded: dict[str, Any]) -> dict[str, Any]:
-    """Decode a MeshCore node advertisement.
-
-    Packet payload layout::
-
-        public_key        32 bytes
-        advert_timestamp   4 bytes, little endian Unix time
-        signature         64 bytes
-        appdata            remaining bytes
-
-    Appdata begins with one flags byte. Optional fields then occur in this
-    order: latitude, longitude, feature1, feature2, and finally node name.
-    """
     result: dict[str, Any] = {
         "advert_public_key": None,
         "advert_timestamp": None,
@@ -747,15 +764,12 @@ def decode_advert(decoded: dict[str, Any]) -> dict[str, Any]:
         "control_error": None,
     }
 
-    packet_payload_hex = decoded.get("packet_payload_hex")
-    normalized = normalize_payload_hex(packet_payload_hex)
+    normalized = normalize_payload_hex(decoded.get("packet_payload_hex"))
     if normalized is None:
         result["advert_error"] = "missing_packet_payload"
         return result
 
     raw = bytes.fromhex(normalized)
-
-    # public key + timestamp + signature
     minimum_length = 32 + 4 + 64
     if len(raw) < minimum_length:
         result["advert_error"] = "advert_too_short"
@@ -763,45 +777,33 @@ def decode_advert(decoded: dict[str, Any]) -> dict[str, Any]:
 
     result["advert_public_key"] = raw[:32].hex()
     result["advert_timestamp"] = int.from_bytes(
-        raw[32:36],
-        byteorder="little",
-        signed=False,
+        raw[32:36], byteorder="little", signed=False
     )
     result["advert_signature_hex"] = raw[36:100].hex()
-
     appdata = raw[100:]
     if not appdata:
         return result
 
     flags = appdata[0]
     result["advert_flags"] = flags
-
     node_type = flags & 0x0F
     result["advert_node_role"] = ADVERT_NODE_ROLE_NAMES.get(
-        node_type,
-        "unknown" if node_type else None,
+        node_type, "unknown" if node_type else None
     )
-
     index = 1
 
     if flags & 0x10:
         if len(appdata) < index + 8:
             result["advert_error"] = "advert_location_truncated"
             return result
-
         lat_raw = int.from_bytes(
-            appdata[index:index + 4],
-            byteorder="little",
-            signed=True,
+            appdata[index:index + 4], byteorder="little", signed=True
         )
         index += 4
         lon_raw = int.from_bytes(
-            appdata[index:index + 4],
-            byteorder="little",
-            signed=True,
+            appdata[index:index + 4], byteorder="little", signed=True
         )
         index += 4
-
         result["advert_lat"] = lat_raw / 1_000_000.0
         result["advert_lon"] = lon_raw / 1_000_000.0
 
@@ -810,9 +812,7 @@ def decode_advert(decoded: dict[str, Any]) -> dict[str, Any]:
             result["advert_error"] = "advert_feature1_truncated"
             return result
         result["advert_feature1"] = int.from_bytes(
-            appdata[index:index + 2],
-            byteorder="little",
-            signed=False,
+            appdata[index:index + 2], byteorder="little", signed=False
         )
         index += 2
 
@@ -821,34 +821,19 @@ def decode_advert(decoded: dict[str, Any]) -> dict[str, Any]:
             result["advert_error"] = "advert_feature2_truncated"
             return result
         result["advert_feature2"] = int.from_bytes(
-            appdata[index:index + 2],
-            byteorder="little",
-            signed=False,
+            appdata[index:index + 2], byteorder="little", signed=False
         )
         index += 2
 
     if flags & 0x80:
-        name_raw = appdata[index:]
         result["advert_name"] = clean_decoded_text(
-            name_raw.decode("utf-8", errors="replace"),
+            appdata[index:].decode("utf-8", errors="replace"),
             96,
         )
-
     return result
 
 
 def decode_control(decoded: dict[str, Any]) -> dict[str, Any]:
-    """Decode MeshCore CONTROL metadata.
-
-    Implemented subtype:
-      * DISCOVER_RESP (0x9)
-
-    DISCOVER_RESP payload:
-      flags   1 byte: upper nibble subtype, lower nibble node type
-      snr     1 byte: signed SNR * 4
-      tag     4 bytes
-      pubkey  8 or 32 bytes
-    """
     result: dict[str, Any] = {
         "control_flags": None,
         "control_subtype": None,
@@ -875,13 +860,11 @@ def decode_control(decoded: dict[str, Any]) -> dict[str, Any]:
     flags = raw[0]
     subtype = (flags >> 4) & 0x0F
     node_type = flags & 0x0F
-
     result["control_flags"] = flags
     result["control_subtype"] = subtype
     result["control_node_type"] = node_type
     result["control_node_role"] = ADVERT_NODE_ROLE_NAMES.get(
-        node_type,
-        "unknown" if node_type else None,
+        node_type, "unknown" if node_type else None
     )
 
     if subtype != 0x09:
@@ -889,7 +872,6 @@ def decode_control(decoded: dict[str, Any]) -> dict[str, Any]:
         return result
 
     result["control_subtype_name"] = "DISCOVER_RESP"
-
     if len(raw) < 6:
         result["control_error"] = "discover_resp_too_short"
         return result
@@ -897,8 +879,8 @@ def decode_control(decoded: dict[str, Any]) -> dict[str, Any]:
     snr_raw = int.from_bytes(raw[1:2], byteorder="little", signed=True)
     result["control_discover_snr"] = snr_raw / 4.0
     result["control_discover_tag"] = raw[2:6].hex()
-
     public_key_raw = raw[6:]
+
     if len(public_key_raw) not in (8, 32):
         result["control_error"] = (
             f"discover_resp_invalid_pubkey_length:{len(public_key_raw)}"
@@ -907,7 +889,6 @@ def decode_control(decoded: dict[str, Any]) -> dict[str, Any]:
 
     result["control_public_key"] = public_key_raw.hex()
     result["control_public_key_bytes"] = len(public_key_raw)
-
     return result
 
 
@@ -921,10 +902,12 @@ PAYLOAD_DECODERS = {
 
 
 def decode_payload_metadata(decoded: dict[str, Any]) -> dict[str, Any]:
-    """Run the payload-specific decoder and normalize mc_rx payload fields."""
     payload_metadata: dict[str, Any] = {
         "channel_hash_hex": None,
         "channel_name": None,
+        "channel_resolution_status": None,
+        "channel_candidate_count": 0,
+        "channel_mac_match_count": 0,
         "grp_txt_plaintext_hex": None,
         "grp_txt_msg_text": None,
         "grp_txt_msg_timestamp": None,
@@ -957,30 +940,23 @@ def decode_payload_metadata(decoded: dict[str, Any]) -> dict[str, Any]:
         "control_public_key_bytes": None,
         "control_error": None,
     }
-
     decoder = PAYLOAD_DECODERS.get(decoded.get("payload_type_name"))
     if decoder is not None:
         payload_metadata.update(decoder(decoded))
-
     return payload_metadata
 
 
 def extract_payload_route_type(payload_hex: Any) -> int | None:
-    """Return the raw MeshCore route type value 0..3."""
     decoded = decode_packet(payload_hex)
-    if decoded is None:
-        return None
-    return decoded["route_type"]
+    return decoded["route_type"] if decoded else None
 
 
 def extract_transport_codes(
     payload_hex: Any,
 ) -> tuple[str | None, str | None]:
-    """Return transport codes for transport-routed packets."""
     decoded = decode_packet(payload_hex)
     if decoded is None:
         return None, None
-
     return decoded["transport1"], decoded["transport2"]
 
 
@@ -989,35 +965,24 @@ def extract_packet_payload_hex(
     path_len: int | None = None,
     path_hash_size: int | None = None,
 ) -> str | None:
-    """Return the packet payload after MeshCore routing metadata.
-
-    ``path_len`` and ``path_hash_size`` remain accepted for compatibility with
-    the existing Companion analyzer. When supplied, they are checked against
-    the values encoded in the packet itself.
-    """
     decoded = decode_packet(payload_hex)
     if decoded is None:
         return None
-
     if path_len is not None:
         try:
             if int(path_len) != decoded["path_len"]:
                 return None
         except (TypeError, ValueError):
             return None
-
     if path_hash_size is not None:
         try:
             if int(path_hash_size) != decoded["path_hash_size"]:
                 return None
         except (TypeError, ValueError):
             return None
-
     return decoded["packet_payload_hex"]
 
 
-# LoRa preset used by the existing Companion analyzer:
-# "EU/UK (Narrow), Switzerland"
 LORA_SF = 8
 LORA_BW_HZ = 62500
 LORA_CR_DENOM = 8
@@ -1026,29 +991,15 @@ LORA_CRC_ENABLED = True
 LORA_EXPLICIT_HEADER = True
 
 
-def safe_int(value: Any) -> int | None:
-    """Convert a value to int without raising."""
-    try:
-        if value is None or value == "":
-            return None
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def parse_received_time_seconds(metadata: dict[str, Any] | None) -> int | None:
-    """Extract the QuestDB timestamp in whole Unix seconds from PacketTap metadata."""
     if not metadata:
         return None
-
     recv_time = safe_int(metadata.get("recv_time"))
     if recv_time is not None:
         return recv_time
-
     received_unix_ns = safe_int(metadata.get("received_unix_ns"))
     if received_unix_ns is not None:
         return received_unix_ns // 1_000_000_000
-
     received_utc = metadata.get("received_utc")
     if received_utc:
         try:
@@ -1061,14 +1012,12 @@ def parse_received_time_seconds(metadata: dict[str, Any] | None) -> int | None:
             return int(parsed.timestamp())
         except (TypeError, ValueError, OverflowError):
             return None
-
     return None
 
 
 def extract_nodes(
     path_nodes: list[str] | tuple[str, ...] | None,
 ) -> tuple[str | None, str | None, str | None, list[str]]:
-    """Return sender, previous hop, repeater and normalized path nodes."""
     nodes = [str(node) for node in (path_nodes or []) if node is not None]
     sender_node = nodes[0] if len(nodes) >= 1 else None
     repeater = nodes[-1] if len(nodes) >= 1 else None
@@ -1077,11 +1026,8 @@ def extract_nodes(
 
 
 def extract_hop_count(path_len: Any) -> int | None:
-    """Convert MeshCore path length to the existing dashboard hop count."""
     value = safe_int(path_len)
-    if value is None:
-        return None
-    return max(0, value - 1)
+    return max(0, value - 1) if value is not None else None
 
 
 def calc_lora_airtime_ms(
@@ -1093,24 +1039,21 @@ def calc_lora_airtime_ms(
     crc_enabled: bool = LORA_CRC_ENABLED,
     explicit_header: bool = LORA_EXPLICIT_HEADER,
 ) -> float | None:
-    """Calculate LoRa airtime using the same formula as mc_rx_analyzer.py."""
     import math
-
     try:
         if payload_bytes is None or payload_bytes < 0:
             return None
-
         ih = 0 if explicit_header else 1
         crc = 1 if crc_enabled else 0
         de = 1 if ((2 ** sf) / bw_hz) > 0.016 else 0
-
         cr_term = cr_denom - 4
         if cr_term < 1 or cr_term > 4:
             return None
-
         symbol_time = (2 ** sf) / bw_hz
         preamble_time = (preamble_symbols + 4.25) * symbol_time
-        numerator = (8 * payload_bytes) - (4 * sf) + 28 + (16 * crc) - (20 * ih)
+        numerator = (
+            (8 * payload_bytes) - (4 * sf) + 28 + (16 * crc) - (20 * ih)
+        )
         denominator = 4 * (sf - (2 * de))
         payload_symbols = 8 + max(
             math.ceil(numerator / denominator) * (cr_term + 4),
@@ -1125,20 +1068,12 @@ def decode_mc_rx_record(
     payload_hex: Any,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Build the exact argument dictionary expected by ``write_mc_rx()``.
-
-    The returned keys match the existing Companion QuestDB writer so the
-    result can later be passed directly with ``await write_mc_rx(**record)``.
-    Unknown fields intentionally remain ``None`` until their decoder stage is
-    implemented.
-    """
     decoded = decode_packet(payload_hex)
     if decoded is None:
         return None
 
     metadata = metadata or {}
     payload_metadata = decode_payload_metadata(decoded)
-
     sender_node, prev_hop, repeater_from_path, nodes = extract_nodes(
         decoded["path_nodes"]
     )
@@ -1150,48 +1085,24 @@ def decode_mc_rx_record(
     else:
         repeater = repeater_from_path
 
-    # DIRECT (route type 2) packets with an empty routing path have no
-    # repeater value from path_nodes. For payload types that identify their
-    # origin unambiguously, preserve that identity as the repeater fallback.
-    #
-    # ADVERT:
-    #   carries a full 32-byte public key and node role.
-    #
-    # CONTROL / DISCOVER_RESP:
-    #   carries an 8- or 32-byte public key and node role.
-    #
-    # Existing repeater information from metadata/path always has priority.
     if not repeater and decoded.get("route_type") == 2:
         if (
             decoded.get("payload_type_name") == "ADVERT"
             and payload_metadata.get("advert_node_role") == "repeater"
         ):
-            advert_public_key = payload_metadata.get("advert_public_key")
-            if advert_public_key:
-                repeater = str(advert_public_key)
-
+            if payload_metadata.get("advert_public_key"):
+                repeater = str(payload_metadata["advert_public_key"])
         elif (
             decoded.get("payload_type_name") == "CONTROL"
-            and payload_metadata.get("control_subtype_name")
-            == "DISCOVER_RESP"
+            and payload_metadata.get("control_subtype_name") == "DISCOVER_RESP"
             and payload_metadata.get("control_node_role") == "repeater"
         ):
-            control_public_key = payload_metadata.get("control_public_key")
-            if control_public_key:
-                repeater = str(control_public_key)
+            if payload_metadata.get("control_public_key"):
+                repeater = str(payload_metadata["control_public_key"])
 
     recv_time = parse_received_time_seconds(metadata)
-
-    # Companion receives pkt_hash directly from RX_LOG_DATA. PacketTap does
-    # not expose it, therefore exact compatibility means leaving it None
-    # unless a future PacketTap version supplies it in metadata.
     pkt_hash = safe_int(metadata.get("pkt_hash"))
 
-    # Region resolution applies to every transport-routed packet type.
-    # MeshCore route types 0 (TRANSPORT_FLOOD) and 3 (TRANSPORT_DIRECT)
-    # carry the two transport codes. As before, transport1 is treated as the
-    # region transport code and is resolved against regions.json using the
-    # actual payload type and packet payload.
     region_code = None
     region_name = None
     if decoded.get("has_transport_codes"):
@@ -1228,9 +1139,6 @@ def decode_mc_rx_record(
         "packet_payload_sha256": decoded["packet_payload_sha256"],
         "txt_msg_dest_hash": payload_metadata["txt_msg_dest_hash"],
         "txt_msg_src_hash": payload_metadata["txt_msg_src_hash"],
-
-        # Passive ADVERT metadata. These fields are decoded only; they are not
-        # written to mc_contacts until the next implementation step.
         "advert_public_key": payload_metadata["advert_public_key"],
         "advert_timestamp": payload_metadata["advert_timestamp"],
         "advert_signature_hex": payload_metadata["advert_signature_hex"],
@@ -1243,7 +1151,6 @@ def decode_mc_rx_record(
         "advert_name": payload_metadata["advert_name"],
         "advert_error": payload_metadata["advert_error"],
         "advert_hop_count": decoded["path_len"],
-
         "control_flags": payload_metadata["control_flags"],
         "control_subtype": payload_metadata["control_subtype"],
         "control_subtype_name": payload_metadata["control_subtype_name"],
@@ -1257,9 +1164,6 @@ def decode_mc_rx_record(
         ],
         "control_error": payload_metadata["control_error"],
         "control_hop_count": decoded["path_len"],
-
-        # PacketTap-specific receive metadata. Companion-originated records
-        # keep these values as None.
         "capture_sequence": safe_int(metadata.get("sequence")),
         "rssi_dbm": safe_int(metadata.get("rssi_dbm")),
         "snr_db": (

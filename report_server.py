@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.56
+MeshCore PacketTap Web UI v0.66
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
@@ -53,13 +53,16 @@ import repeater_report as rr
 import mesh_report as mr
 
 
-APP_VERSION = "0.56"
+APP_VERSION = "0.66"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
 MAP_DIR = BASE_DIR / "map"
 REPORTS_DIR = BASE_DIR / "reports"
 PREVIEW_DIR = BASE_DIR / "state" / "report_preview"
 NODE_DIRECTORY_DB = BASE_DIR / "state" / "node_directory.db"
+PUBLIC_CHANNELS_FILE = BASE_DIR / "public_channels.json"
+PUBLIC_CHANNEL_KEYS_FILE = BASE_DIR / "public_channel_keys.json"
+PUBLIC_CHANNEL_UPDATE_SCRIPT = BASE_DIR / "update_public_channels.py"
 
 DEFAULT_CONFIG = {
     "questdb_host": "192.168.1.2",
@@ -1185,8 +1188,11 @@ def _render_mesh_role_map(
 
 def build_mesh_overview(
     config: dict[str, Any],
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    date_from, date_to = mesh_overview_dates()
+    if not date_from or not date_to:
+        date_from, date_to = mesh_overview_dates()
     period_from = normalize_date(date_from, end=False)
     period_to = normalize_date(date_to, end=True)
 
@@ -2222,6 +2228,7 @@ def page(
     </script>
     """
     nav_suffix = "?" + urllib.parse.urlencode({"site": site_key})
+    body_class = "mesh-page" if title == "Mesh Report" else ""
     doc = f"""<!doctype html>
 <html lang="de">
 <head>
@@ -2249,6 +2256,12 @@ body {{
   padding:0 22px 50px;
   line-height:1.45;
 }}
+body.mesh-page {{
+  width:calc(100% - 48px);
+  max-width:1600px;
+  margin:24px auto;
+  padding:0 0 50px;
+}}
 header {{
   display:flex;
   justify-content:space-between;
@@ -2266,6 +2279,12 @@ header {{
 .site-card h3 {{margin:0 0 12px;}}
 .site-card .site-key {{color:var(--muted);font-size:.76rem;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;margin-top:-8px;margin-bottom:12px;}}
 .site-card-actions {{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;}}
+.tools-status-grid {{
+  margin:16px 0;
+}}
+.tool-action-form {{
+  margin:14px 0 8px;
+}}
 button.danger {{background:#8f2d25;}}
 button.danger:hover {{background:#75221c;}}
 h1 {{ margin:0; font-size:1.75rem; }}
@@ -2560,6 +2579,82 @@ button:hover, .button:hover {{ opacity:.88; }}
   border-radius:10px;
   padding:12px;
   background:#fff;
+}}
+.mesh-dashboard-head {{
+  margin-bottom:16px;
+}}
+.mesh-period-form {{
+  display:flex;
+  align-items:flex-end;
+  gap:12px;
+  flex-wrap:wrap;
+  padding:14px;
+  margin:14px 0 8px;
+  border:1px solid #ddd;
+  border-radius:10px;
+  background:#fafafa;
+}}
+.mesh-period-field {{
+  min-width:180px;
+}}
+.mesh-period-field label {{
+  display:block;
+  margin-bottom:5px;
+  font-size:.86rem;
+  font-weight:600;
+}}
+.mesh-period-field input {{
+  width:100%;
+}}
+.mesh-period-actions {{
+  display:flex;
+  gap:8px;
+  align-items:center;
+  flex-wrap:wrap;
+}}
+.mesh-period-caption {{
+  margin-bottom:12px;
+}}
+.mesh-dashboard-card {{
+  width:100%;
+}}
+.mesh-dashboard-card .mesh-traffic-table {{
+  table-layout:auto;
+}}
+.mesh-dashboard-card {{
+  overflow-x:auto;
+}}
+.mesh-dashboard-card .mesh-traffic-table {{
+  width:100%;
+  min-width:1180px;
+}}
+.mesh-dashboard-card .mesh-traffic-table th:first-child,
+.mesh-dashboard-card .mesh-traffic-table td:first-child {{
+  min-width:150px;
+}}
+.mesh-dashboard-stack {{
+  display:flex;
+  flex-direction:column;
+  gap:16px;
+  margin:16px 0;
+}}
+.mesh-dashboard-card {{
+  margin:0;
+  overflow-x:auto;
+  overflow-y:hidden;
+}}
+.mesh-dashboard-card h2 {{
+  margin-bottom:4px;
+}}
+.mesh-traffic-table td:first-child {{
+  max-width:220px;
+  overflow-wrap:anywhere;
+}}
+.mesh-traffic-table .mesh-traffic-detail {{
+  min-width:150px;
+  font-size:.78rem;
+  line-height:1.3;
+  vertical-align:top;
 }}
 .mesh-map-toolbar {{
   display:flex;
@@ -2966,6 +3061,11 @@ footer {{
   font-size:.8rem;
 }}
 @media(max-width:650px) {{
+  body.mesh-page {{
+    width:100%;
+    margin:18px auto;
+    padding:0 14px 40px;
+  }}
   header {{ display:block; }}
   nav {{ margin-top:12px; }}
   nav a {{ margin-left:0; margin-right:16px; }}
@@ -2998,7 +3098,7 @@ footer {{
 }}
 </style>
 </head>
-<body>
+<body class="{body_class}">
 <header>
   <div>
     <div class="help">MeshCore</div>
@@ -5093,8 +5193,332 @@ def form_page(
     return page("Repeater Report", body, config=config, site_key=config.get("site_key"))
 
 
+def _mesh_dashboard_repeater_name(
+    resolver: Any,
+    repeater: Any,
+    path_hash_size: Any,
+) -> str:
+    pid = rr.norm(repeater)
+    if not pid:
+        return "–"
+
+    local = resolver.resolve_path_id(
+        pid,
+        rr.to_int(path_hash_size),
+    )
+    if len(local) == 1:
+        return local[0].adv_name or pid
+
+    directory = resolver.resolve_directory_path_id(pid)
+    if (
+        directory.status == "directory_unique"
+        and len(directory.candidates) == 1
+    ):
+        return directory.candidates[0].name or pid
+
+    return pid
+
+
+def build_mesh_traffic_dashboard(
+    config: dict[str, Any],
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    """
+    Aggregate #channels and regions for the same rolling 28-day window as
+    the Mesh map.
+
+    Source: mc_rx
+      channel  -> logical MeshCore #channel
+      region   -> routing region
+      repeater -> final path element before the PacketTap receiver
+    """
+    if not date_from or not date_to:
+        date_from, date_to = mesh_overview_dates()
+
+    period_from = normalize_date(date_from, end=False)
+    period_to = normalize_date(date_to, end=True)
+
+    db = rr.QuestDB(
+        config["questdb_host"],
+        config["questdb_port"],
+    )
+
+    available = db.table_columns("mc_rx")
+    required = {
+        "ts",
+        "channel",
+        "region",
+        "repeater",
+        "path_hash_size",
+        "receiver_id",
+        "receiver_name",
+        "grp_txt_sender_name",
+    }
+    missing = required - available
+    if missing:
+        raise RuntimeError(
+            "mc_rx fehlen Spalten für das Mesh-Dashboard: "
+            + ", ".join(sorted(missing))
+        )
+
+    where = [
+        rr.time_filter(
+            "ts",
+            period_from,
+            period_to,
+        )
+    ]
+    receiver_filter = rr.receiver_filter(
+        config.get("receiver_id") or None,
+        config.get("receiver_name") or None,
+    )
+    if receiver_filter:
+        where.append(receiver_filter)
+
+    rows = db.rows(
+        f"""
+        SELECT
+            channel,
+            region,
+            repeater,
+            path_hash_size,
+            grp_txt_sender_name
+        FROM mc_rx
+        WHERE {' AND '.join(where)}
+        """
+    )
+
+    contacts = rr.load_contacts(db)
+    resolver = rr.ContactResolver(
+        contacts,
+        node_directory_db=NODE_DIRECTORY_DB,
+    )
+
+    from collections import Counter, defaultdict
+
+    channel_counts: Counter[str] = Counter()
+    region_counts: Counter[str] = Counter()
+    channel_repeaters: dict[str, Counter[str]] = defaultdict(Counter)
+    region_repeaters: dict[str, Counter[str]] = defaultdict(Counter)
+
+    channel_senders: dict[str, Counter[str]] = defaultdict(Counter)
+    region_senders: dict[str, Counter[str]] = defaultdict(Counter)
+
+    channel_regions: dict[str, Counter[str]] = defaultdict(Counter)
+    region_channels: dict[str, Counter[str]] = defaultdict(Counter)
+
+    total_rows = len(rows)
+    channel_rows = 0
+    region_rows = 0
+
+    repeater_name_cache: dict[tuple[str, int | None], str] = {}
+
+    for row in rows:
+        repeater = rr.norm(row.get("repeater"))
+        path_hash_size = rr.to_int(row.get("path_hash_size"))
+
+        repeater_name = "–"
+        if repeater:
+            cache_key = (repeater, path_hash_size)
+            repeater_name = repeater_name_cache.get(cache_key, "")
+            if not repeater_name:
+                repeater_name = _mesh_dashboard_repeater_name(
+                    resolver,
+                    repeater,
+                    path_hash_size,
+                )
+                repeater_name_cache[cache_key] = repeater_name
+
+        channel = rr.text_value(row.get("channel")).strip()
+        region = rr.text_value(row.get("region")).strip()
+        sender_name = rr.text_value(
+            row.get("grp_txt_sender_name")
+        ).strip()
+
+        if channel:
+            channel_rows += 1
+            channel_counts[channel] += 1
+
+            if repeater:
+                channel_repeaters[channel][repeater_name] += 1
+
+            if sender_name:
+                channel_senders[channel][sender_name] += 1
+
+            if region:
+                channel_regions[channel][region] += 1
+
+        if region:
+            region_rows += 1
+            region_counts[region] += 1
+
+            if repeater:
+                region_repeaters[region][repeater_name] += 1
+
+            if sender_name:
+                region_senders[region][sender_name] += 1
+
+            if channel:
+                region_channels[region][channel] += 1
+
+    def ranked(
+        counts: Counter[str],
+        repeater_counts: dict[str, Counter[str]],
+        sender_counts: dict[str, Counter[str]],
+        related_counts: dict[str, Counter[str]],
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        total = sum(counts.values())
+        result = []
+
+        for value, count in counts.most_common(limit):
+            repeaters = [
+                {
+                    "name": name,
+                    "packets": packets,
+                }
+                for name, packets
+                in repeater_counts.get(value, Counter()).most_common(5)
+            ]
+
+            senders = [
+                {
+                    "name": name,
+                    "packets": packets,
+                }
+                for name, packets
+                in sender_counts.get(value, Counter()).most_common(5)
+            ]
+
+            related = [
+                {
+                    "name": name,
+                    "packets": packets,
+                }
+                for name, packets
+                in related_counts.get(value, Counter()).most_common(5)
+            ]
+
+            result.append(
+                {
+                    "value": value,
+                    "packets": count,
+                    "share": (
+                        (count * 100.0 / total)
+                        if total
+                        else 0.0
+                    ),
+                    "repeaters": repeaters,
+                    "senders": senders,
+                    "related": related,
+                }
+            )
+
+        return result
+
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "total_packets": total_rows,
+        "channel_packets": channel_rows,
+        "region_packets": region_rows,
+        "channels": ranked(
+            channel_counts,
+            channel_repeaters,
+            channel_senders,
+            channel_regions,
+        ),
+        "regions": ranked(
+            region_counts,
+            region_repeaters,
+            region_senders,
+            region_channels,
+        ),
+        "channel_count": len(channel_counts),
+        "region_count": len(region_counts),
+    }
+
+
+def _mesh_traffic_top_list(
+    items: list[dict[str, Any]],
+    limit: int = 5,
+) -> str:
+    if not items:
+        return "<span class='muted'>–</span>"
+
+    return "<br>".join(
+        (
+            f"{esc(item['name'])} "
+            f"<span class='muted'>"
+            f"({esc(item['packets'])})"
+            f"</span>"
+        )
+        for item in items[:limit]
+    )
+
+
+def _mesh_traffic_table(
+    entries: list[dict[str, Any]],
+    value_label: str,
+    related_label: str,
+) -> str:
+    if not entries:
+        return (
+            "<div class='neighbor-empty'>"
+            "Keine Daten im gewählten Beobachtungszeitraum."
+            "</div>"
+        )
+
+    rows = []
+
+    for item in entries:
+        repeater_html = _mesh_traffic_top_list(
+            item.get("repeaters") or [],
+        )
+        sender_html = _mesh_traffic_top_list(
+            item.get("senders") or [],
+        )
+        related_html = _mesh_traffic_top_list(
+            item.get("related") or [],
+        )
+
+        rows.append(
+            f"""
+            <tr>
+              <td><strong>{esc(item['value'])}</strong></td>
+              <td class="num">{esc(item['packets'])}</td>
+              <td class="num">{esc(f"{item['share']:.1f} %")}</td>
+              <td class="mesh-traffic-detail">{repeater_html}</td>
+              <td class="mesh-traffic-detail">{sender_html}</td>
+              <td class="mesh-traffic-detail">{related_html}</td>
+            </tr>
+            """
+        )
+
+    return f"""
+    <table class="neighbor-advert-table mesh-traffic-table">
+      <thead>
+        <tr>
+          <th>{esc(value_label)}</th>
+          <th class="num">Pakete</th>
+          <th class="num">Anteil</th>
+          <th>Top Eingangs-Repeater</th>
+          <th>Top Absender</th>
+          <th>{esc(related_label)}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows)}
+      </tbody>
+    </table>
+    """
+
+
 def mesh_form_page(
     config: dict[str, Any],
+    date_from: str | None = None,
+    date_to: str | None = None,
     message: str = "",
     error: bool = False,
 ) -> bytes:
@@ -5105,8 +5529,51 @@ def mesh_form_page(
 
     default_from, default_to = default_report_dates()
 
+    overview_default_from, overview_default_to = mesh_overview_dates()
+    selected_from = date_from or overview_default_from
+    selected_to = date_to or overview_default_to
+
+    # Validate dates early. If the user swaps them, normalize to ascending order.
     try:
-        mesh_map_html, mesh_map_summary = build_mesh_overview(config)
+        selected_from_date = date.fromisoformat(selected_from)
+        selected_to_date = date.fromisoformat(selected_to)
+        if selected_from_date > selected_to_date:
+            selected_from, selected_to = selected_to, selected_from
+    except ValueError:
+        selected_from, selected_to = overview_default_from, overview_default_to
+        if not message:
+            message = "Ungültiger Zeitraum – auf die letzten 28 Tage zurückgesetzt."
+            error = True
+        cls = "error"
+        msg_html = f'<div class="message {cls}">{esc(message)}</div>'
+
+    try:
+        mesh_traffic = build_mesh_traffic_dashboard(
+            config,
+            selected_from,
+            selected_to,
+        )
+        mesh_traffic_error = ""
+    except Exception as exc:
+        mesh_traffic = {
+            "date_from": selected_from,
+            "date_to": selected_to,
+            "total_packets": "–",
+            "channel_packets": "–",
+            "region_packets": "–",
+            "channels": [],
+            "regions": [],
+            "channel_count": "–",
+            "region_count": "–",
+        }
+        mesh_traffic_error = str(exc)
+
+    try:
+        mesh_map_html, mesh_map_summary = build_mesh_overview(
+            config,
+            selected_from,
+            selected_to,
+        )
     except Exception as exc:
         mesh_map_html = (
             "<div class='map-error'>"
@@ -5114,14 +5581,13 @@ def mesh_form_page(
             f"{esc(exc)}"
             "</div>"
         )
-        map_from, map_to = mesh_overview_dates()
         mesh_map_summary = {
             "repeaters": "–",
             "geo_repeaters": "–",
             "rejected_geo": "–",
             "max_geo_distance_km": config.get("max_geo_distance_km", 500.0),
-            "date_from": map_from,
-            "date_to": map_to,
+            "date_from": selected_from,
+            "date_to": selected_to,
             "role_counts": {},
             "role_geo_counts": {},
             "role_rejected_counts": {},
@@ -5157,35 +5623,115 @@ def mesh_form_page(
         for role in role_order
     )
 
+    channel_table = _mesh_traffic_table(
+        mesh_traffic.get("channels") or [],
+        "#Channel",
+        "Top Regionen",
+    )
+    region_table = _mesh_traffic_table(
+        mesh_traffic.get("regions") or [],
+        "Region",
+        "Top #Channels",
+    )
+
     body = f"""
 {msg_html}
-<div class="card mesh-generate-card">
-  <h2>Mesh Report erzeugen</h2>
-  <p class="help mesh-generate-help">
-    Standortbezogenen Mesh-Report für den gewählten Zeitraum erzeugen.
-  </p>
-
-  <div class="message mesh-observer">
-    <strong>Beobachtungsstandort:</strong>
-    {esc(mesh_site_name)}
-    {f'<span class="receiver-detail">{esc(mesh_receiver_detail)}</span>' if mesh_receiver_detail else ''}
-  </div>
-
-  <form method="post" action="/generate-mesh">
-    <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
-    <div class="grid">
-      <div class="field">
-        <label for="date_from">Von</label>
-        <input id="date_from" name="date_from" type="date" value="{esc(default_from)}" required>
-      </div>
-      <div class="field">
-        <label for="date_to">Bis</label>
-        <input id="date_to" name="date_to" type="date" value="{esc(default_to)}" required>
+<section class="mesh-dashboard-head">
+  <div class="mesh-overview-header">
+    <div>
+      <h2>Mesh Dashboard</h2>
+      <div class="help">
+        Laufende Übersicht des beobachteten Mesh.
       </div>
     </div>
+  </div>
 
-    <button type="submit">Mesh Report erzeugen</button>
+  <form method="get" action="/mesh" class="mesh-period-form">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
+    <div class="mesh-period-field">
+      <label for="mesh-date-from">Auswertung von</label>
+      <input
+        id="mesh-date-from"
+        type="date"
+        name="date_from"
+        value="{esc(selected_from)}"
+        required
+      >
+    </div>
+    <div class="mesh-period-field">
+      <label for="mesh-date-to">bis</label>
+      <input
+        id="mesh-date-to"
+        type="date"
+        name="date_to"
+        value="{esc(selected_to)}"
+        required
+      >
+    </div>
+    <div class="mesh-period-actions">
+      <button type="submit">Zeitraum anwenden</button>
+      <a
+        class="button secondary"
+        href="{esc(site_url('/mesh', config.get('site_key', '')))}"
+      >Letzte 28 Tage</a>
+    </div>
   </form>
+
+  <div class="help mesh-period-caption">
+    Ausgewertet wird {esc(mesh_traffic['date_from'])} – {esc(mesh_traffic['date_to'])}.
+    Die Karte verwendet denselben Zeitraum.
+  </div>
+
+  <div class="mesh-overview-facts">
+    <div class="mesh-overview-fact">
+      <span class="fact-label">Pakete</span>
+      <strong>{esc(mesh_traffic['total_packets'])}</strong>
+    </div>
+    <div class="mesh-overview-fact">
+      <span class="fact-label">Verwendete #Channels</span>
+      <strong>{esc(mesh_traffic['channel_count'])}</strong>
+    </div>
+    <div class="mesh-overview-fact">
+      <span class="fact-label">Beobachtete Regionen</span>
+      <strong>{esc(mesh_traffic['region_count'])}</strong>
+    </div>
+    <div class="mesh-overview-fact">
+      <span class="fact-label">Beobachtungsstandort</span>
+      <strong>{esc(mesh_site_name)}</strong>
+    </div>
+  </div>
+
+  {f'<div class="message error">Traffic-Auswertung konnte nicht vollständig geladen werden: {esc(mesh_traffic_error)}</div>' if mesh_traffic_error else ''}
+</section>
+
+<div class="mesh-dashboard-stack">
+  <section class="card mesh-dashboard-card">
+    <div class="mesh-dashboard-card-head">
+      <div>
+        <h2>Meist verwendete #Channels</h2>
+        <div class="help">
+          Paketanzahl je logischem MeshCore-Channel. Zusätzlich werden die
+          häufigsten Eingangs-Repeater, GRP_TXT-Absender und zugehörigen Regionen
+          für diesen Channel gezeigt.
+        </div>
+      </div>
+    </div>
+    {channel_table}
+  </section>
+
+  <section class="card mesh-dashboard-card">
+    <div class="mesh-dashboard-card-head">
+      <div>
+        <h2>Meist verwendete Regionen</h2>
+        <div class="help">
+          Paketanzahl je Routing-Region. Zusätzlich werden die häufigsten
+          Eingangs-Repeater, GRP_TXT-Absender und verwendeten #Channels
+          innerhalb dieser Region gezeigt.
+        </div>
+      </div>
+    </div>
+    {region_table}
+  </section>
 </div>
 
 <section class="mesh-overview">
@@ -5242,11 +5788,159 @@ def mesh_form_page(
   </div>
   {mesh_map_html}
 </section>
+
+<div class="card mesh-generate-card">
+  <h2>Mesh Report bei Bedarf erzeugen</h2>
+  <p class="help mesh-generate-help">
+    Standortbezogenen Mesh-Report für den gewählten Zeitraum erzeugen.
+  </p>
+
+  <div class="message mesh-observer">
+    <strong>Beobachtungsstandort:</strong>
+    {esc(mesh_site_name)}
+    {f'<span class="receiver-detail">{esc(mesh_receiver_detail)}</span>' if mesh_receiver_detail else ''}
+  </div>
+
+  <form method="post" action="/generate-mesh">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', ''))}">
+    <div class="grid">
+      <div class="field">
+        <label for="date_from">Von</label>
+        <input id="date_from" name="date_from" type="date" value="{esc(default_from)}" required>
+      </div>
+      <div class="field">
+        <label for="date_to">Bis</label>
+        <input id="date_to" name="date_to" type="date" value="{esc(default_to)}" required>
+      </div>
+    </div>
+
+    <button type="submit">Mesh Report erzeugen</button>
+  </form>
+</div>
+
+
 """
     return page("Mesh Report", body, config=config, site_key=config.get("site_key"))
 
+def _load_json_list(path: Path) -> list[Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def public_channel_inventory() -> dict[str, int]:
+    channels = _load_json_list(PUBLIC_CHANNELS_FILE)
+    keys = _load_json_list(PUBLIC_CHANNEL_KEYS_FILE)
+    return {
+        "channels": len(channels),
+        "explicit_keys": len(keys),
+        "total": len(channels) + len(keys),
+    }
+
+
+def update_public_channels_via_script(
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Run BASE_DIR/update_public_channels.py once with all distinct QuestDB
+    endpoints defined by the configured sites.
+
+    The updater merges historical GRP_TXT payloads from all databases before
+    applying its min-match verification. Duplicate payloads observed at
+    multiple sites count only once toward the verification threshold.
+    """
+    if not PUBLIC_CHANNEL_UPDATE_SCRIPT.exists():
+        raise RuntimeError(
+            "Update-Skript nicht gefunden: "
+            f"{PUBLIC_CHANNEL_UPDATE_SCRIPT}"
+        )
+
+    endpoints: dict[tuple[str, int], list[str]] = defaultdict(list)
+    for site_key, profile in (config.get("sites") or {}).items():
+        host = str(profile.get("questdb_host") or "").strip()
+        port = int(profile.get("questdb_port") or 9000)
+        if host:
+            endpoints[(host, port)].append(
+                str(profile.get("name") or site_key)
+            )
+
+    if not endpoints:
+        raise RuntimeError("Keine QuestDB-Standorte konfiguriert.")
+
+    before = public_channel_inventory()
+
+    command = [
+        sys.executable,
+        str(PUBLIC_CHANNEL_UPDATE_SCRIPT),
+        "--project-dir",
+        str(BASE_DIR),
+    ]
+
+    endpoint_labels: list[str] = []
+    endpoint_urls: list[str] = []
+
+    for (host, port), names in endpoints.items():
+        endpoint_labels.append(", ".join(names))
+        url = f"http://{host}:{port}/"
+        endpoint_urls.append(url)
+        command.extend([
+            "--questdb-url",
+            url,
+        ])
+
+    command.append("--apply")
+
+    child_env = os.environ.copy()
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env["PYTHONUTF8"] = "1"
+
+    completed = subprocess.run(
+        command,
+        cwd=str(BASE_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=1800,
+        env=child_env,
+    )
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+
+    if completed.returncode != 0:
+        detail = stderr or stdout or f"Exit-Code {completed.returncode}"
+        raise RuntimeError(
+            "Channel-Update fehlgeschlagen: "
+            + detail[-2000:]
+        )
+
+    after = public_channel_inventory()
+
+    return {
+        "before": before,
+        "after": after,
+        "added_channels": max(
+            0,
+            after["channels"] - before["channels"],
+        ),
+        "added_keys": max(
+            0,
+            after["explicit_keys"] - before["explicit_keys"],
+        ),
+        "endpoint_labels": endpoint_labels,
+        "endpoint_urls": endpoint_urls,
+        "stdout": stdout,
+        "stderr": stderr,
+        "script": str(PUBLIC_CHANNEL_UPDATE_SCRIPT),
+    }
+
+
 
 def settings_page(config: dict[str, Any], message: str = "", error: bool = False) -> bytes:
+    channel_inventory = public_channel_inventory()
     msg_html = ""
     if message:
         msg_html = f'<div class="message {"error" if error else "ok"}">{esc(message)}</div>'
@@ -5345,6 +6039,48 @@ def settings_page(config: dict[str, Any], message: str = "", error: bool = False
     </div>
     <button type="submit">Einstellungen speichern</button>
   </form>
+</div>
+
+<div class="card">
+  <h2>Tools</h2>
+  <h3>Public Channels aktualisieren</h3>
+  <p class="help">
+    Prüft die historischen <span class="mono">GRP_TXT</span>-Pakete aus allen
+    unterschiedlichen QuestDB-Datenbanken der definierten Standorte gegen die
+    Community-Liste <span class="mono">marcelverdult/meshcore-channels</span>.
+    Das Skript <span class="mono">update_public_channels.py</span> aus dem
+    Projekt-Hauptverzeichnis wird einmal mit allen unterschiedlichen
+    QuestDB-Endpunkten gestartet. Die historischen GRP_TXT-Payloads aller
+    Standorte werden vor der MAC-/Decrypt-Verifikation zusammengeführt.
+    Bestehende lokale Einträge bleiben erhalten.
+  </p>
+  <div class="status-grid tools-status-grid">
+    <div class="status-box">
+      <span class="fact-label">#Channels</span>
+      <strong>{esc(channel_inventory["channels"])}</strong>
+    </div>
+    <div class="status-box">
+      <span class="fact-label">Explizite Keys</span>
+      <strong>{esc(channel_inventory["explicit_keys"])}</strong>
+    </div>
+    <div class="status-box">
+      <span class="fact-label">Gesamt</span>
+      <strong>{esc(channel_inventory["total"])}</strong>
+    </div>
+  </div>
+  <form method="post" action="/tools/update-public-channels" class="tool-action-form">
+    <input type="hidden" name="site" value="{esc(config.get('site_key', config['active_site']))}">
+    <button
+      type="submit"
+      onclick="return confirm('Alle definierten QuestDB-Datenbanken auswerten und die lokalen Channel-JSON-Dateien aktualisieren?');"
+    >Public Channels aus allen Standorten aktualisieren</button>
+  </form>
+  <p class="help">
+    Erwarteter Pfad:
+    <span class="mono">C:\\meshcore-packettap\\update_public_channels.py</span>.
+    Das Update-Skript legt seine Sicherungen selbst an. Importer/Analyzer
+    anschließend neu starten, damit deren Channel-Cache neu geladen wird.
+  </p>
 </div>"""
     return page("Einstellungen", body, config=config, site_key=config.get("site_key"))
 
@@ -5557,7 +6293,23 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/mesh":
-                self.send_html(mesh_form_page(config))
+                query = urllib.parse.parse_qs(
+                    parsed.query,
+                    keep_blank_values=True,
+                )
+                date_from = query.get("date_from", [""])[-1] or None
+                date_to = query.get("date_to", [""])[-1] or None
+                message = query.get("message", [""])[-1]
+                error = query.get("error", ["0"])[-1] == "1"
+                self.send_html(
+                    mesh_form_page(
+                        config,
+                        date_from=date_from,
+                        date_to=date_to,
+                        message=message,
+                        error=error,
+                    )
+                )
                 return
 
             if path == "/neighbors":
@@ -5841,6 +6593,38 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
 
+            if path == "/tools/update-public-channels":
+                result = update_public_channels_via_script(base_config)
+
+                endpoint_names = ", ".join(
+                    result["endpoint_labels"]
+                )
+
+                message = (
+                    "Public Channels gemeinsam über "
+                    f"{len(result['endpoint_urls'])} "
+                    "QuestDB-Endpunkte aktualisiert. "
+                    f"Aktuell: {result['after']['channels']} #Channels + "
+                    f"{result['after']['explicit_keys']} explizite Keys "
+                    f"({result['after']['total']} gesamt). "
+                    f"Neu hinzugekommen: {result['added_channels']} #Channels, "
+                    f"{result['added_keys']} explizite Keys."
+                )
+
+                if endpoint_names:
+                    message += f" Ausgewertet: {endpoint_names}."
+
+                shown = dict(base_config)
+                shown["site_key"] = current_site
+                self.send_html(
+                    settings_page(
+                        shown,
+                        message,
+                        error=False,
+                    )
+                )
+                return
+
             if path == "/settings":
                 import shlex
                 updated = dict(base_config)
@@ -6044,9 +6828,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 config = dict(DEFAULT_CONFIG)
 
-            if path == "/settings":
+            if path in ("/settings", "/tools/update-public-channels"):
+                shown = dict(config)
+                try:
+                    shown["site_key"] = current_site
+                except Exception:
+                    pass
                 self.send_html(
-                    settings_page(config, str(exc), error=True),
+                    settings_page(shown, str(exc), error=True),
                     HTTPStatus.BAD_REQUEST,
                 )
             elif path == "/generate-mesh":
