@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.70
+MeshCore PacketTap Web UI v0.76
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
@@ -50,10 +50,26 @@ from pathlib import Path
 from typing import Any
 
 import repeater_report as rr
-import mesh_report as mr
+
+# v0.71: bevorzugt die versionierte Mesh-Report-Implementierung v0.41.
+# Wird sie später als mesh_report.py übernommen, bleibt der Fallback kompatibel.
+_MESH_REPORT_V041 = Path(__file__).resolve().parent / "mesh_report_v0.41.py"
+if _MESH_REPORT_V041.is_file():
+    import importlib.util as _importlib_util
+    _mesh_spec = _importlib_util.spec_from_file_location(
+        "mesh_report_v041",
+        _MESH_REPORT_V041,
+    )
+    if _mesh_spec is None or _mesh_spec.loader is None:
+        raise RuntimeError("mesh_report_v0.41.py konnte nicht geladen werden.")
+    mr = _importlib_util.module_from_spec(_mesh_spec)
+    sys.modules[_mesh_spec.name] = mr
+    _mesh_spec.loader.exec_module(mr)
+else:
+    import mesh_report as mr
 
 
-APP_VERSION = "0.70"
+APP_VERSION = "0.76"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
 MAP_DIR = BASE_DIR / "map"
@@ -2706,6 +2722,78 @@ button:hover, .button:hover {{ opacity:.88; }}
 .mesh-dashboard-card .mesh-traffic-table td:first-child {{
   min-width:150px;
 }}
+.mesh-load-grid {{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:10px;
+  margin:12px 0 14px;
+}}
+.mesh-load-card {{
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:var(--soft);
+  padding:12px;
+}}
+.mesh-load-card .value {{
+  font-size:1.35rem;
+  font-weight:700;
+}}
+.mesh-load-assessment {{
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:11px 13px;
+  margin:12px 0;
+  background:#fafafa;
+}}
+.mesh-load-assessment.positive strong {{ color:var(--ok); }}
+.mesh-load-assessment.warning strong {{ color:#9a6200; }}
+.mesh-load-assessment.critical strong {{ color:#a32622; }}
+.mesh-load-value-positive {{ color:#7b9b82; }}
+.mesh-load-value-warning {{ color:#b28a35; }}
+.mesh-load-value-critical {{ color:#a94a45; }}
+.mesh-load-chart {{
+  height:120px;
+  display:flex;
+  align-items:flex-end;
+  gap:2px;
+  border-bottom:1px solid var(--line);
+  padding-top:8px;
+  overflow:hidden;
+  position:relative;
+}}
+.mesh-load-threshold {{
+  position:absolute;
+  left:0;
+  right:0;
+  border-top:1px dashed rgba(90,90,90,.38);
+  z-index:2;
+  pointer-events:none;
+}}
+.mesh-load-bars {{
+  position:absolute;
+  inset:8px 0 0 0;
+  display:flex;
+  align-items:flex-end;
+  gap:2px;
+  z-index:1;
+}}
+.mesh-load-bar {{
+  flex:1 1 0;
+  min-width:2px;
+  border-radius:2px 2px 0 0;
+}}
+.mesh-load-bar.quiet {{ background:#7b9b82; }}
+.mesh-load-bar.active {{ background:#b28a35; }}
+.mesh-load-bar.saturated {{ background:#a94a45; }}
+.mesh-load-legend {{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  color:var(--muted);
+  font-size:.8rem;
+  margin-top:5px;
+  flex-wrap:wrap;
+}}
 .mesh-dashboard-stack {{
   display:flex;
   flex-direction:column;
@@ -3154,6 +3242,7 @@ footer {{
   .mesh-overview-header {{ display:block; }}
   .mesh-overview-summary {{ text-align:left; margin-top:6px; }}
   .mesh-overview-facts {{ grid-template-columns:1fr; }}
+  .mesh-load-grid {{ grid-template-columns:1fr; }}
   .neighbor-kpis {{ grid-template-columns:1fr; }}
   .report-doc-context {{ grid-template-columns:1fr; }}
   .neighbor-map {{ height:350px; }}
@@ -5589,6 +5678,158 @@ def _mesh_traffic_table(
     """
 
 
+
+def build_mesh_load_dashboard(
+    config: dict[str, Any],
+    date_from: str,
+    date_to: str,
+) -> tuple[Any, list[tuple[Any, int]]]:
+    period_from = normalize_date(date_from, end=False)
+    period_to = normalize_date(date_to, end=True)
+    db = rr.QuestDB(
+        config["questdb_host"],
+        config["questdb_port"],
+    )
+    rows = mr.load_mesh_rx(
+        db,
+        period_from,
+        period_to,
+        config.get("receiver_id") or None,
+        config.get("receiver_name") or None,
+    )
+    return mr.analyze_load(rows, period_from, period_to)
+
+
+def render_mesh_load_dashboard(
+    load: Any,
+    minute_values: list[tuple[Any, int]],
+) -> str:
+    load_kind, load_label = mr.load_assessment(
+        load.avg_packets_per_minute
+    )
+    load_value_class = {
+        "positive": "mesh-load-value-positive",
+        "warning": "mesh-load-value-warning",
+        "critical": "mesh-load-value-critical",
+    }.get(load_kind, "")
+    total_minutes = max(
+        1,
+        load.minutes_quiet
+        + load.minutes_active
+        + load.minutes_saturated,
+    )
+    quiet_pct = (
+        100.0 * load.minutes_quiet / total_minutes
+    )
+    active_pct = (
+        100.0 * load.minutes_active / total_minutes
+    )
+    saturated_pct = (
+        100.0 * load.minutes_saturated / total_minutes
+    )
+
+    compact, group_size = mr._compact_load_values(
+        minute_values,
+        max_bars=220,
+    )
+    display_peak = max(
+        (value for _, value in compact),
+        default=1.0,
+    ) or 1.0
+
+    bars = []
+    for dt, value in compact:
+        kind, label = mr.minute_load_class(value)
+        css = {
+            "positive": "quiet",
+            "warning": "active",
+            "critical": "saturated",
+        }[kind]
+        height = max(
+            2,
+            round(110 * value / display_peak),
+        )
+        bars.append(
+            f'<div class="mesh-load-bar {css}" '
+            f'style="height:{height}px" '
+            f'title="{esc(dt.strftime("%d.%m. %H:%M"))}: '
+            f'{esc(mr.fmt_num(value, 1))} Pakete/min · '
+            f'{esc(label)}"></div>'
+        )
+
+    bar_caption = (
+        "jede Säule = 1 Minute"
+        if group_size == 1
+        else f"jede Säule = Ø aus {group_size} Minuten"
+    )
+
+    return f"""
+<section class="card mesh-dashboard-card">
+  <h2>Netzlast am Beobachtungsstandort</h2>
+  <div class="help">
+    KiekR-Bewertung: 0–5 Pakete/min = Ruhig ·
+    6–20 Pakete/min = Aktiv · ab 21 Pakete/min = Ausgelastet.
+  </div>
+
+  <div class="mesh-load-grid">
+    <div class="mesh-load-card">
+      <span class="fact-label">Ø Pakete/min</span>
+      <div class="value">{esc(mr.fmt_num(load.avg_packets_per_minute, 1))}</div>
+    </div>
+    <div class="mesh-load-card">
+      <span class="fact-label">Peak Pakete/min</span>
+      <div class="value">{esc(load.max_packets_per_minute)}</div>
+      <div class="help">höchste Einzelminute</div>
+    </div>
+    <div class="mesh-load-card">
+      <span class="fact-label">Ausgelastete Minuten</span>
+      <div class="value">{esc(mr.fmt_pct(saturated_pct))}</div>
+      <div class="help">{esc(load.minutes_saturated)} min</div>
+    </div>
+    <div class="mesh-load-card">
+      <span class="fact-label">Bewertung Ø-Last</span>
+      <div class="value {esc(load_value_class)}">{esc(load_label)}</div>
+    </div>
+  </div>
+
+  <div class="mesh-load-assessment {esc(load_kind)}">
+    <strong>{esc(load_label)}:</strong>
+    Durchschnittlich {esc(mr.fmt_num(load.avg_packets_per_minute, 1))}
+    Pakete/min. Im Zeitraum waren
+    {esc(mr.fmt_pct(quiet_pct))} ruhig,
+    {esc(mr.fmt_pct(active_pct))} aktiv und
+    {esc(mr.fmt_pct(saturated_pct))} ausgelastet.
+  </div>
+
+  <div class="mesh-load-chart">
+    {
+      (
+        f'<div class="mesh-load-threshold" '
+        f'style="bottom:{min(100.0, 100.0 * 5.5 / display_peak):.2f}%">'
+        f'</div>'
+        if display_peak >= 5.5 else ''
+      )
+    }
+    {
+      (
+        f'<div class="mesh-load-threshold" '
+        f'style="bottom:{min(100.0, 100.0 * 20.5 / display_peak):.2f}%">'
+        f'</div>'
+        if display_peak >= 20.5 else ''
+      )
+    }
+    <div class="mesh-load-bars">{''.join(bars)}</div>
+  </div>
+  <div class="mesh-load-legend">
+    <span>{esc(bar_caption)}</span>
+    <span>
+      Peak Einzelminute:
+      {esc(load.max_packets_per_minute)} Pakete/min
+    </span>
+  </div>
+</section>
+"""
+
 def mesh_form_page(
     config: dict[str, Any],
     date_from: str | None = None,
@@ -5622,6 +5863,26 @@ def mesh_form_page(
             error = True
         cls = "error"
         msg_html = f'<div class="message {cls}">{esc(message)}</div>'
+
+    try:
+        mesh_load, mesh_load_values = build_mesh_load_dashboard(
+            config,
+            selected_from,
+            selected_to,
+        )
+        mesh_load_html = render_mesh_load_dashboard(
+            mesh_load,
+            mesh_load_values,
+        )
+    except Exception as exc:
+        mesh_load_html = (
+            '<section class="card mesh-dashboard-card">'
+            '<h2>Netzlast am Beobachtungsstandort</h2>'
+            '<div class="message error">'
+            'Netzlast konnte nicht geladen werden: '
+            + esc(exc)
+            + '</div></section>'
+        )
 
     try:
         mesh_traffic = build_mesh_traffic_dashboard(
@@ -5789,6 +6050,8 @@ def mesh_form_page(
 
   {f'<div class="message error">Traffic-Auswertung konnte nicht vollständig geladen werden: {esc(mesh_traffic_error)}</div>' if mesh_traffic_error else ''}
 </section>
+
+{mesh_load_html}
 
 <div class="mesh-dashboard-stack">
   <section class="card mesh-dashboard-card">
