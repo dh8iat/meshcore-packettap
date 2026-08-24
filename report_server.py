@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.76
+MeshCore PacketTap Web UI v0.86
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
@@ -34,6 +34,8 @@ import mimetypes
 import sys
 import subprocess
 import shutil
+import tempfile
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -69,7 +71,7 @@ else:
     import mesh_report as mr
 
 
-APP_VERSION = "0.76"
+APP_VERSION = "0.86"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
 MAP_DIR = BASE_DIR / "map"
@@ -81,6 +83,9 @@ PUBLIC_CHANNEL_KEYS_FILE = BASE_DIR / "public_channel_keys.json"
 PUBLIC_CHANNEL_UPDATE_SCRIPT = BASE_DIR / "update_public_channels.py"
 REGIONS_FILE = BASE_DIR / "regions.json"
 REGION_UPDATE_SCRIPT = BASE_DIR / "update_regions.py"
+
+# Edge/Chrome PDF rendering is serialized because the web server is threaded.
+PDF_RENDER_LOCK = threading.Lock()
 
 DEFAULT_CONFIG = {
     "questdb_host": "192.168.1.2",
@@ -789,7 +794,7 @@ def _render_mesh_role_map(
             + "</strong><br>"
             + "Rolle: "
             + escapeHtml(labels[role] || role)
-            + "<br><span class='mono'>"
+            + "<br>Public Key: <span class='mono' style='overflow-wrap:anywhere;word-break:break-all;'>"
             + escapeHtml(node.public_key || "")
             + "</span>"
           );
@@ -1450,20 +1455,54 @@ def find_pdf_browser() -> Path | None:
     return None
 
 
-def save_preview_pdf(
+def generate_preview_pdf_temp(
     config: dict[str, Any],
     token: str,
-) -> Path:
+) -> tuple[Path, str, Path]:
+    """Generate a PDF in a temporary directory for immediate browser download."""
     _, meta = load_preview(token)
     source_name = str(meta.get("filename") or f"report-{token}.html")
     pdf_name = str(Path(source_name).with_suffix(".pdf"))
-    destination = unique_destination(output_dir(config), pdf_name)
 
     browser = find_pdf_browser()
     if browser is None:
         raise RuntimeError(
             "Für PDF wurde weder Microsoft Edge noch Google Chrome gefunden."
         )
+
+    # Use stable project-local paths. This mirrors the standalone Python
+    # test that reliably generated PDFs on the production host.
+    pdf_temp_base = BASE_DIR / "state" / "pdf_tmp"
+    pdf_temp_base.mkdir(parents=True, exist_ok=True)
+
+    # Each PDF job gets its own Edge profile. Reusing one persistent profile
+    # can cause a later Edge invocation to attach to a still-running background
+    # process and return 0 without actually executing --print-to-pdf.
+    profile_base = BASE_DIR / "state" / "edge_pdf_profiles"
+    profile_base.mkdir(parents=True, exist_ok=True)
+
+    job_id = uuid.uuid4().hex
+    user_data_dir = profile_base / job_id
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    unique_name = f"{job_id}_{pdf_name}"
+    destination = pdf_temp_base / unique_name
+
+    # Callers only need the generated file; profiles are cleaned lazily.
+    temp_root = pdf_temp_base
+
+    # Remove stale per-job browser profiles from earlier PDF runs.
+    profile_cutoff = time.time() - 3600
+    try:
+        for old_profile in profile_base.iterdir():
+            if (
+                old_profile.is_dir()
+                and old_profile != user_data_dir
+                and old_profile.stat().st_mtime < profile_cutoff
+            ):
+                shutil.rmtree(old_profile, ignore_errors=True)
+    except OSError:
+        pass
 
     port = int(config.get("web_port", 8080))
     preview_url = (
@@ -1477,26 +1516,92 @@ def save_preview_pdf(
         "--no-pdf-header-footer",
         "--run-all-compositor-stages-before-draw",
         "--virtual-time-budget=5000",
+        "--no-first-run",
+        "--no-default-browser-check",
+        f"--user-data-dir={user_data_dir}",
         f"--print-to-pdf={destination}",
         preview_url,
     ]
 
-    result = subprocess.run(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=45,
-    )
-
-    if result.returncode != 0 or not destination.is_file():
-        detail = (result.stdout or "").strip()
-        raise RuntimeError(
-            "PDF-Erzeugung fehlgeschlagen."
-            + (f" Browser-Ausgabe: {detail}" if detail else "")
+    # ThreadingHTTPServer may receive more than one PDF request at once.
+    # Serialize the actual browser render operation and give each job its own
+    # profile so Mesh, Neighbor and Repeater exports behave identically.
+    with PDF_RENDER_LOCK:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45,
         )
 
-    return destination
+        # Edge/Chromium can return from the launcher before the PDF renderer
+        # has actually finished writing the file. Wait for the file to appear
+        # and for its size to become stable before deciding success/failure.
+        deadline = time.time() + 20.0
+        last_size = -1
+        stable_checks = 0
+        pdf_ok = False
+
+        while time.time() < deadline:
+            try:
+                if destination.is_file():
+                    size = destination.stat().st_size
+                    if size > 0:
+                        if size == last_size:
+                            stable_checks += 1
+                        else:
+                            stable_checks = 0
+                            last_size = size
+
+                        if stable_checks >= 2:
+                            pdf_ok = True
+                            break
+            except OSError:
+                pass
+
+            time.sleep(0.2)
+
+    if not pdf_ok:
+        detail = (result.stdout or "").strip()
+        debug_lines = [
+            "PDF-Erzeugung fehlgeschlagen.",
+            f"Browser: {browser}",
+            f"Preview-URL: {preview_url}",
+            f"Ziel: {destination}",
+            f"Edge-Profil: {user_data_dir}",
+            f"Returncode: {result.returncode}",
+            f"PDF vorhanden: {destination.is_file()}",
+        ]
+        try:
+            debug_lines.append(
+                f"PDF-Größe: {destination.stat().st_size if destination.is_file() else 0} Byte"
+            )
+        except OSError as exc:
+            debug_lines.append(f"PDF-Größe nicht lesbar: {exc}")
+
+        if detail:
+            debug_lines.append("Browser-Ausgabe: " + detail)
+
+        debug_text = " | ".join(debug_lines)
+        print("[PDF] " + debug_text, flush=True)
+
+        try:
+            destination.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(debug_text)
+
+    print(
+        "[PDF] Erfolgreich: "
+        f"{destination} ({destination.stat().st_size} Byte) "
+        f"via {browser} profile={user_data_dir} returncode={result.returncode}",
+        flush=True,
+    )
+
+    return destination, pdf_name, temp_root
 
 
 def cleanup_previews(max_age_hours: int = 24) -> None:
@@ -1542,7 +1647,7 @@ def preview_page(
       <form method="post" action="/save-preview">
         <input type="hidden" name="token" value="{esc(token)}">
         <button type="submit" name="format" value="pdf">
-          PDF speichern
+          PDF herunterladen
         </button>
       </form>
     </div>
@@ -2014,6 +2119,50 @@ def latest_packet_status(config: dict[str, Any]) -> tuple[str, str, float | None
         return f"nicht ermittelbar: {exc}", "", None
 
 
+
+def recent_packet_count(
+    config: dict[str, Any],
+    minutes: int = 5,
+) -> tuple[int | None, str]:
+    """Count packets for the selected receiver in the recent time window."""
+    minutes = max(1, int(minutes))
+    receiver_id = config.get("receiver_id") or None
+    receiver_name = config.get("receiver_name") or None
+    rf = rr.receiver_filter(receiver_id, receiver_name)
+
+    where = [f"ts > dateadd('m', -{minutes}, now())"]
+    if rf:
+        where.append(rf)
+
+    sql = (
+        "select count(*) packets "
+        "from mc_rx where "
+        + " and ".join(where)
+    )
+
+    query = urllib.parse.quote(sql)
+    url = (
+        f"http://{config['questdb_host']}:{config['questdb_port']}"
+        f"/exec?query={query}"
+    )
+
+    try:
+        with urllib.request.urlopen(url, timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        dataset = data.get("dataset") or []
+        if dataset and dataset[0]:
+            try:
+                count = int(dataset[0][0])
+            except (TypeError, ValueError):
+                count = 0
+            return count, f"Pakete in den letzten {minutes} min"
+
+        return 0, f"Pakete in den letzten {minutes} min"
+    except Exception as exc:
+        return None, f"nicht ermittelbar: {exc}"
+
+
 def log_activity(
     config: dict[str, Any],
     script_name: str,
@@ -2075,7 +2224,7 @@ def pipeline_state(
         if age is not None
     ]
     if ages and max(ages) <= 60:
-        return True, "Aktuell", "Receiver, Importer und Datenbank sind aktiv."
+        return True, "Aktuell", "Receiver, Importer und Datenbank sind aktiv; aktuelle Paketdaten kommen in QuestDB an."
 
     if packet_age is not None and packet_age > 300:
         return False, "Keine aktuelle Aktivität", "Seit mehr als 5 Minuten kein neues Paket in QuestDB."
@@ -2104,6 +2253,11 @@ def dashboard_page(
         latest_packet_status(config)
         if db_ok
         else ("–", "", None)
+    )
+    packets_5m, packets_5m_detail = (
+        recent_packet_count(config, 5)
+        if db_ok
+        else (None, "QuestDB nicht erreichbar")
     )
 
     receiver_script = config["receiver_script"]
@@ -2179,10 +2333,18 @@ def dashboard_page(
         else "Automatische Aktualisierung: aus"
     )
 
-    quest_main = packet_time
+    quest_main = (
+        f"{fmt_int(packets_5m)} Pakete / 5 min"
+        if packets_5m is not None
+        else "Paketzahl nicht ermittelbar"
+    )
     quest_detail = db_detail
+    if packet_time and packet_time != "–":
+        quest_detail += f" · Letztes Paket: {packet_time}"
     if packet_age_text:
         quest_detail += f" · {packet_age_text}"
+    if packets_5m is None and packets_5m_detail:
+        quest_detail += f" · {packets_5m_detail}"
 
     site_name = config.get("site_name") or config.get("receiver_name") or "–"
     collector_type = config.get("collector_type", "packettap")
@@ -4254,7 +4416,7 @@ def neighbor_page(
       <input type="hidden" name="neighbor" value="{esc(selected.public_key)}">
       <input type="hidden" name="date_from" value="{esc(date_from)}">
       <input type="hidden" name="date_to" value="{esc(date_to)}">
-      <button type="submit" name="format" value="pdf">PDF speichern</button>
+      <button type="submit" name="format" value="pdf">PDF herunterladen</button>
     </form>
     """}
   </div>
@@ -4770,7 +4932,7 @@ def save_neighbor_analysis(
     date_from: str,
     date_to: str,
     output_format: str,
-) -> Path:
+) -> tuple[Path, str, Path]:
     """Persist the current neighbor analysis as HTML or PDF."""
     if not neighbor_query:
         raise RuntimeError("Kein Nachbar ausgewählt.")
@@ -4849,7 +5011,7 @@ def save_neighbor_analysis(
 
     try:
         if output_format == "pdf":
-            return save_preview_pdf(config, token)
+            return generate_preview_pdf_temp(config, token)
         raise RuntimeError("Es wird nur PDF als Speicherformat unterstützt.")
     finally:
         try:
@@ -6649,6 +6811,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def send_file_download(
+        self,
+        path: Path,
+        download_name: str,
+        content_type: str = "application/pdf",
+    ) -> None:
+        data = path.read_bytes()
+        safe_name = download_name.replace('"', "")
+        encoded_name = urllib.parse.quote(download_name)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header(
+            "Content-Disposition",
+            f'attachment; filename="{safe_name}"; filename*=UTF-8\'\'{encoded_name}',
+        )
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
         self.send_header("Location", location)
@@ -7233,7 +7415,7 @@ class Handler(BaseHTTPRequestHandler):
                 date_to = data.get("date_to", "")
                 output_format = data.get("format", "").lower()
 
-                destination = save_neighbor_analysis(
+                destination, download_name, temp_root = save_neighbor_analysis(
                     config,
                     neighbor_query,
                     date_from,
@@ -7241,16 +7423,14 @@ class Handler(BaseHTTPRequestHandler):
                     output_format,
                 )
 
-                message = f"Gespeichert: {destination.name}"
-                query_string = urllib.parse.urlencode(
-                    {
-                        "neighbor": neighbor_query,
-                        "date_from": date_from,
-                        "date_to": date_to,
-                        "message": message,
-                    }
-                )
-                self.redirect(f"/neighbors?site={urllib.parse.quote(current_site)}&{query_string}")
+                try:
+                    self.send_file_download(
+                        destination,
+                        download_name,
+                        "application/pdf",
+                    )
+                finally:
+                    destination.unlink(missing_ok=True)
                 return
 
             if path == "/save-preview":
@@ -7258,15 +7438,20 @@ class Handler(BaseHTTPRequestHandler):
                 output_format = data.get("format", "").lower()
 
                 if output_format == "pdf":
-                    destination = save_preview_pdf(config, token)
+                    destination, download_name, temp_root = (
+                        generate_preview_pdf_temp(config, token)
+                    )
                 else:
                     raise RuntimeError("Es wird nur PDF als Speicherformat unterstützt.")
 
-                message = f"Gespeichert: {destination.name}"
-                self.redirect(
-                    f"/preview/{urllib.parse.quote(token)}?"
-                    + urllib.parse.urlencode({"message": message})
-                )
+                try:
+                    self.send_file_download(
+                        destination,
+                        download_name,
+                        "application/pdf",
+                    )
+                finally:
+                    destination.unlink(missing_ok=True)
                 return
 
             self.send_error(HTTPStatus.NOT_FOUND)

@@ -27,3 +27,15 @@ Thumbs.db
 
 # Local public channel keys
 public_channel_keys.json
+
+# Local backup files
+*.bak
+* - Kopie.py
+
+# Local version snapshots
+report_server_v*.py
+repeater_report_v*.py
+mesh_report_v*.py
+meshcore_decoder_v*.py
+node_directory_v*.py
+update_public_channels_v*.py
