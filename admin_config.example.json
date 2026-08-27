@@ -1,0 +1,25 @@
+{
+  "mode": "agent",
+  "web_host": "0.0.0.0",
+  "web_port": 8082,
+  "agent_token": "b234567891234567890ab12345678901",
+  "action_timeout": 25,
+  "services": {
+    "questdb": {
+      "label": "QuestDB",
+      "service_name": "QuestDB"
+    },
+    "receiver": {
+      "label": "PacketTap Receiver",
+      "service_name": "MeshCorePacketTapReceiver"
+    },
+    "importer": {
+      "label": "PacketTap Importer",
+      "service_name": "MeshCorePacketTapImporter"
+    },
+    "web": {
+      "label": "PacketTap Web",
+      "service_name": "MeshCorePacketTapWeb"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+<service>
+  <id>MeshCorePacketTapAdmin</id>
+  <name>MeshCore PacketTap Admin</name>
+  <description>MeshCore Service Admin Agent - DEV</description>
+  <env name="PYTHONIOENCODING" value="utf-8"/>
+  <env name="PYTHONUTF8" value="1"/>
+  <executable>C:\PATH\TO\python.exe</executable>
+  <arguments>-u C:\meshcore-packettap\admin_server.py --config C:\meshcore-packettap\admin_config.json</arguments>
+  <workingdirectory>C:\meshcore-packettap</workingdirectory>
+  <startmode>Automatic</startmode>
+  <logpath>C:\meshcore-packettap\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10485760</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+  <onfailure action="restart" delay="10 sec"/>
+</service>

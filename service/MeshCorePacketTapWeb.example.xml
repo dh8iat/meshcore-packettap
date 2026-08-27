@@ -1,0 +1,23 @@
+<service>
+  <id>MeshCorePacketTapWeb</id>
+  <name>MeshCore PacketTap Web</name>
+  <description>MeshCore PacketTap Report Web UI - DEV</description>
+
+  <env name="PYTHONIOENCODING" value="utf-8"/>
+  <env name="PYTHONUTF8" value="1"/>
+
+  <executable>C:\PATH\TO\python.exe</executable>
+  <arguments>-u C:\meshcore-packettap\report_server.py</arguments>
+
+  <workingdirectory>C:\meshcore-packettap</workingdirectory>
+
+  <startmode>Manual</startmode>
+
+  <logpath>C:\meshcore-packettap\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10485760</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+
+  <onfailure action="restart" delay="10 sec"/>
+</service>

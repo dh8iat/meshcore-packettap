@@ -39,3 +39,16 @@ mesh_report_v*.py
 meshcore_decoder_v*.py
 node_directory_v*.py
 update_public_channels_v*.py
+
+# Local admin configuration
+admin_config.json
+admin_config_PROD.json
+admin_config_DEV.json
+
+# Local Windows service configuration / WinSW
+service/*.xml
+!service/*.example.xml
+service/*.exe
+service/*.wrapper.log
+service/*.out.log
+service/*.err.log
