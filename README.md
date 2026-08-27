@@ -1,31 +1,75 @@
 # MeshCore PacketTap
 
-MeshCore PacketTap erfasst MeshCore-Verkehr, dekodiert die empfangenen Pakete und schreibt die ausgewerteten Informationen nach QuestDB. Eine lokale Weboberfläche dient als Kommandozentrale für den laufenden Betrieb und für die Auswertung des beobachteten Mesh.
+MeshCore PacketTap erfasst MeshCore-Verkehr, dekodiert empfangene Pakete und schreibt die ausgewerteten Informationen nach QuestDB. Eine Weboberfläche dient der Auswertung des beobachteten Mesh; unter Windows werden die zentralen Komponenten als Dienste betrieben.
 
 Für die Datenerfassung stehen aktuell zwei Wege zur Verfügung:
 
 1. **PacketTap-Receiver** mit angepasster PacketTap-Firmware, `receiver.py` und `packettap_importer.py`.
 2. **MeshCore TCP Companion** mit Standard-MeshCore-Companion-Firmware und direkter Erfassung über `mc_rx_analyzer.py`.
 
-Beide Wege erzeugen eine für Mesh-, Repeater- und Nachbar-Auswertungen kompatible QuestDB-Datenbasis. Die Weboberfläche unterstützt mehrere umschaltbare Beobachtungsstandorte.
+Beide Wege erzeugen eine für Mesh-, Repeater- und Nachbar-Auswertungen kompatible QuestDB-Datenbasis.
 
 ## Aktueller Stand
 
-Der aktuelle Entwicklungsstand umfasst insbesondere:
+Der aktuelle Stand umfasst insbesondere:
 
 - zuverlässige PacketTap-Erfassung und QuestDB-Import
 - direkte Erfassung über einen Standard-MeshCore-TCP-Companion
+- getrennte DEV- und PROD-Umgebungen
+- Windows-Dienstbetrieb für Receiver, Importer, Report-Webserver und Service-Admin
+- getrennte QuestDB-Instanzen für DEV und PROD
+- zentrale Dienstverwaltung für PROD und DEV über `admin_server.py`
 - mehrere umschaltbare Standortprofile
-- editierbare Profil-IDs und Löschen von Standortprofilen
-- Anzeigename des Standorts als primäre Bezeichnung in Oberfläche und Reports
-- Receivername und Public Key als dezente technische Zusatzinformation
 - standortbezogene Mesh-Auswertung
 - detaillierte Repeater-Auswertung
 - Analyse direkter Nachbarn
 - interaktive Kartenansichten
-- konfigurierbaren Geo-Plausibilitätsfilter gegen fehlerhafte Advert-Koordinaten
-- Erhalt der unveränderten Rohkoordinaten in QuestDB
-- Report-Vorschau und gezieltes dauerhaftes Speichern als PDF
+- konfigurierbaren Geo-Plausibilitätsfilter
+- Report-Vorschau mit direktem PDF-Download über den Browser
+
+## DEV-/PROD-Aufbau
+
+Die Windows-Umgebungen sind funktional weitgehend angeglichen, verwenden aber getrennte Datenbanken und eigene lokale Konfigurationen.
+
+```text
+PROD 192.168.1.2
+├─ QuestDB                     :9000
+├─ PacketTap Receiver          :9001
+├─ Report Web                  :8080
+├─ Service Admin Controller    :8081
+└─ Windows-Dienste für Receiver, Importer, Web und Admin
+
+DEV 192.168.1.90
+├─ QuestDB                     :9000
+├─ PacketTap Receiver          :9001
+├─ Report Web                  :8080
+├─ Service Admin Agent         :8082
+└─ Windows-Dienste für Receiver, Importer, Web und Admin
+```
+
+Für DEV ist ein eigener PacketTap-Repeater vorgesehen. Dadurch kann die komplette Pipeline unabhängig von PROD getestet werden.
+
+### PacketTap-Pipeline
+
+```text
+PacketTap-Repeater
+        |
+        | TCP :9001
+        v
+receiver.py
+        |
+        v
+packettap_capture.log
+        |
+        v
+packettap_importer.py
+        |
+        v
+QuestDB :9000
+        |
+        v
+report_server.py :8080
+```
 
 ## Erfassungswege
 
@@ -48,6 +92,8 @@ packettap_importer.py
      QuestDB
 ```
 
+Der Receiver lauscht in der aktuellen Windows-Installation auf TCP-Port `9001`.
+
 ### MeshCore TCP Companion
 
 ```text
@@ -67,7 +113,7 @@ meshcore_decoder.py
 
 Der Companion-Weg verwendet `RX_LOG_DATA` und übernimmt unter anderem RSSI, SNR, Receiver-Identität und Companion-Informationen direkt aus der TCP-Verbindung.
 
-Der eigene Beobachtungsstandort wird aus den per `APPSTART` gelieferten Informationen einschließlich `adv_lat` und `adv_lon` in `mc_contacts` eingetragen. Dadurch kann auch ein Companion-basierter Standort in Karten und Reports geografisch aufgelöst werden.
+Der eigene Beobachtungsstandort wird aus den per `APPSTART` gelieferten Informationen einschließlich `adv_lat` und `adv_lon` in `mc_contacts` eingetragen.
 
 ## Hauptkomponenten
 
@@ -75,26 +121,44 @@ Der eigene Beobachtungsstandort wird aus den per `APPSTART` gelieferten Informat
 
 Nimmt die PacketTap-TCP-Verbindung entgegen und verarbeitet PKTH- und PKTP-Frames.
 
+Manueller Start zu Diagnosezwecken:
+
 ```powershell
-python receiver.py --append
+python receiver.py --append --host 0.0.0.0 --port 9001
 ```
 
-Single-Instance-Schutz und kontrollierter Stop:
+Im regulären Windows-Betrieb läuft der Receiver als Dienst:
+
+```text
+MeshCorePacketTapReceiver
+```
+
+Single-Instance-Schutz und Stop-Datei bleiben intern vorhanden:
 
 ```text
 state/receiver.lock
 state/receiver.stop
 ```
 
+Die bevorzugte Steuerung erfolgt jedoch über den Windows-Dienst bzw. `admin_server.py`.
+
 ### `packettap_importer.py`
 
 Liest `packettap_capture.log`, dekodiert MeshCore-Pakete und schreibt die Daten nach QuestDB.
 
+Manueller Start zu Diagnosezwecken:
+
 ```powershell
-python packettap_importer.py --follow
+python packettap_importer.py --follow --questdb-host <HOST> --questdb-port 9000
 ```
 
-Persistenter Checkpoint und Prozesssteuerung:
+Im regulären Windows-Betrieb läuft der Importer als Dienst:
+
+```text
+MeshCorePacketTapImporter
+```
+
+Persistenter Checkpoint und Prozessschutz:
 
 ```text
 state/importer.state
@@ -129,26 +193,30 @@ Wesentliche Eigenschaften:
 
 Erzeugt die Auswertung eines ausgewählten Repeaters. Der Beobachtungsstandort wird mit dem Anzeigenamen des Standortprofils dargestellt; Receivername und Public Key erscheinen als technische Zusatzinformation.
 
-`mc_contact_observations` kann je nach Erfassungsweg eine designierte Zeitspalte `ts` oder `timestamp` besitzen. Beide Varianten werden unterstützt.
-
 ### `mesh_report.py`
 
 Erzeugt einen standortbezogenen Report über das tatsächlich beobachtete Mesh. Dazu gehören Last, Routing-Verteilung, Repeater-Aktivität, Nachbarn und geografische Ausdehnung.
 
-Für Karten werden nur plausible Koordinaten verwendet. Die Rohkoordinaten in QuestDB bleiben unverändert.
-
 ### `report_server.py`
 
-Start:
+Der Report-Webserver bietet die zentrale Auswertungsoberfläche.
+
+Manueller Start:
 
 ```powershell
 python report_server.py
 ```
 
-Standard:
+Im regulären Windows-Betrieb läuft er als Dienst:
 
 ```text
-http://127.0.0.1:8080
+MeshCorePacketTapWeb
+```
+
+Typischer Aufruf im lokalen Netz:
+
+```text
+http://<HOST>:8080/
 ```
 
 Navigation:
@@ -156,6 +224,69 @@ Navigation:
 ```text
 Übersicht | Mesh | Repeater | Nachbarn | Einstellungen
 ```
+
+## Service Admin
+
+### `admin_server.py`
+
+`admin_server.py` dient zur Statusanzeige und Steuerung der Windows-Dienste. Derselbe Code wird in zwei Betriebsarten verwendet:
+
+- **Controller** auf PROD
+- **Agent** auf DEV
+
+### PROD Controller
+
+Auf PROD läuft der Controller typischerweise unter:
+
+```text
+http://192.168.1.2:8081/
+```
+
+Er zeigt PROD und DEV gemeinsam an und unterstützt `Start`, `Stop` und `Neustart` für:
+
+```text
+QuestDB
+MeshCorePacketTapReceiver
+MeshCorePacketTapImporter
+MeshCorePacketTapWeb
+```
+
+Der Admin-Dienst selbst wird bewusst nicht über die eigene Weboberfläche gesteuert.
+
+### DEV Agent
+
+Auf DEV läuft derselbe `admin_server.py` im Agent-Modus auf Port `8082`. Der Agent stellt eine authentifizierte API für den PROD-Controller bereit.
+
+Auf beiden Windows-Rechnern läuft der Admin-Server als:
+
+```text
+MeshCorePacketTapAdmin
+```
+
+## Windows-Dienste und WinSW
+
+Die produktiv verwendeten lokalen WinSW-Dateien sind installationsspezifisch und werden nicht eingecheckt.
+
+Im Repository liegen stattdessen Beispiele:
+
+```text
+service/
+├─ MeshCorePacketTapAdmin.example.xml
+├─ MeshCorePacketTapReceiver.example.xml
+├─ MeshCorePacketTapImporter.example.xml
+└─ MeshCorePacketTapWeb.example.xml
+```
+
+Die lokalen Dateien heißen beispielsweise:
+
+```text
+service/MeshCorePacketTapAdmin.xml
+service/MeshCorePacketTapReceiver.xml
+service/MeshCorePacketTapImporter.xml
+service/MeshCorePacketTapWeb.xml
+```
+
+Die lokalen XML-Dateien und WinSW-EXE-Dateien werden durch `.gitignore` ausgeschlossen. Vor Verwendung der Example-Dateien müssen insbesondere Python-Pfad, Hostnamen und installationsspezifische Parameter angepasst werden.
 
 ## Standortprofile
 
@@ -171,9 +302,7 @@ Ein Standortprofil enthält unter anderem:
 - Receiver Public Key / ID
 - maximale Kartenentfernung
 
-Die **Profil-ID ist editierbar**. Standortprofile können gelöscht werden; der letzte verbleibende Standort ist gegen Löschen geschützt.
-
-Der Anzeigename wird in der Weboberfläche und in den Reports als primäre Standortbezeichnung verwendet.
+Die Profil-ID ist editierbar. Standortprofile können gelöscht werden; der letzte verbleibende Standort ist gegen Löschen geschützt.
 
 ## Mesh-Karte
 
@@ -190,7 +319,7 @@ Eine Repeatersuche erlaubt das gezielte Hervorheben eines Repeaters.
 
 ## Geo-Plausibilitätsfilter
 
-Fehlerhafte Koordinaten in Repeater-Adverts werden bewusst **nicht aus QuestDB gelöscht**. Stattdessen werden sie nur für Karten und geografische Auswertungen gefiltert.
+Fehlerhafte Koordinaten in Repeater-Adverts werden bewusst nicht aus QuestDB gelöscht. Stattdessen werden sie nur für Karten und geografische Auswertungen gefiltert.
 
 ```text
 Advert-Koordinaten
@@ -211,57 +340,63 @@ max_geo_distance_km = 500
 
 Der Wert wird pro Standortprofil gespeichert und kann unter **Einstellungen** geändert werden. `0` deaktiviert den Distanzfilter.
 
-Damit bleiben die empfangenen Rohdaten vollständig nachvollziehbar, während falsche Positionsangaben die Mesh- und Nachbarkarten nicht über tausende Kilometer verzerren.
+## Konfiguration
 
-Auch bei der Nachbar-Auswertung wird eine Position außerhalb des eingestellten Radius nicht für Entfernung oder Verbindungslinie verwendet.
+### Report-Konfiguration
 
-## Einstellungen
-
-Die lokale Konfiguration liegt in:
+Die lokale Report-Konfiguration liegt in:
 
 ```text
 report_config.json
 ```
 
-Sie ist installationsspezifisch und sollte nicht ins Repository eingecheckt werden.
+Sie ist installationsspezifisch und wird nicht ins Repository eingecheckt.
 
-Eine Mehrstandort-Konfiguration enthält konzeptionell beispielsweise:
+### Admin-Konfiguration
 
-```json
-{
-  "active_site": "hornisgrinde",
-  "sites": {
-    "hornisgrinde": {
-      "name": "Hornisgrinde",
-      "collector_type": "companion",
-      "questdb_host": "127.0.0.1",
-      "questdb_port": 9000,
-      "receiver_name": "DK0A",
-      "receiver_id": "<public-key>",
-      "max_geo_distance_km": 500
-    },
-    "stutensee": {
-      "name": "Stutensee - Spoeck",
-      "collector_type": "packettap",
-      "questdb_host": "127.0.0.1",
-      "questdb_port": 9000,
-      "receiver_name": "Stutensee - Spoeck",
-      "receiver_id": "<public-key>",
-      "max_geo_distance_km": 500
-    }
-  }
-}
+Die lokale Admin-Konfiguration liegt in:
+
+```text
+admin_config.json
 ```
 
-Weitere globale Einstellungen wie Ausgabeordner, Web Host/Port, Skripte, Startargumente, Logs, Locks und Checkpoints bleiben Teil der Konfiguration.
+Sie enthält unter anderem:
+
+- Betriebsart `controller` oder `agent`
+- Web-Port
+- Admin-Zugangsdaten des Controllers
+- Agent-Token
+- Hostdefinitionen
+- verwaltete Windows-Dienste
+
+Die echte `admin_config.json` wird nicht eingecheckt. Als Vorlage dient:
+
+```text
+admin_config.example.json
+```
+
+Passwörter und Agent-Tokens dürfen nicht in das Repository übernommen werden.
 
 ## Report-Vorschau und PDF
 
-Mesh- und Repeater-Reports werden zunächst als Browser-Vorschau geöffnet. Die Navigation bleibt erhalten.
+Mesh-, Repeater- und Nachbar-Reports können als PDF heruntergeladen werden.
 
-Über **Speichern** kann ein Report dauerhaft als PDF abgelegt werden. Die Nachbar-Auswertung kann ebenfalls als PDF gespeichert werden.
+```text
+Report erzeugen
+      |
+      v
+Browser-Vorschau
+      |
+      v
+PDF herunterladen
+      |
+      v
+Browser-Download auf dem Client
+```
 
-Für die PDF-Erzeugung wird lokal Microsoft Edge oder Google Chrome im Headless-Modus verwendet.
+Das PDF wird serverseitig temporär mit Microsoft Edge oder Google Chrome im Headless-Modus erzeugt und anschließend direkt an den Browser ausgeliefert. Die erzeugten PDFs werden nicht dauerhaft als Report-Dateien auf dem Server abgelegt.
+
+Für parallele oder aufeinanderfolgende PDF-Jobs verwendet `report_server.py` getrennte temporäre Browserprofile.
 
 ## Datenmodell-Kompatibilität
 
@@ -276,22 +411,35 @@ mc_companion_info
 
 PacketTap-spezifische Felder wie `capture_sequence`, `crc_ok`, `received_unix_ns`, `packettap_version` oder `packettap_flags` stehen beim TCP-Companion nicht zwingend zur Verfügung.
 
-## Sicheres Stoppen
+## Betrieb und Steuerung
 
-PacketTap Receiver und Importer sollten geordnet beendet werden:
+Im Windows-Betrieb sollten die Dienste bevorzugt über den Service Admin oder die Windows-Dienstverwaltung gesteuert werden.
 
-```powershell
-New-Item -ItemType File state\receiver.stop
-New-Item -ItemType File state\importer.stop
+Typische Dienste:
+
+```text
+QuestDB
+MeshCorePacketTapReceiver
+MeshCorePacketTapImporter
+MeshCorePacketTapWeb
+MeshCorePacketTapAdmin
 ```
 
-`mc_rx_analyzer.py` verarbeitet `Ctrl+C` und systemd `SIGTERM` über einen geordneten Shutdown-Pfad.
+Für Diagnosezwecke können einzelne Python-Skripte weiterhin manuell in PowerShell gestartet werden. Vorher sollte der zugehörige Windows-Dienst gestoppt werden, damit keine zweite Instanz entsteht.
 
 ## Betrieb im lokalen Netzwerk
 
-Standardmäßig bindet sich die Weboberfläche an `127.0.0.1:8080`. Für den Zugriff im lokalen Netzwerk kann `web_host` beispielsweise auf `0.0.0.0` gesetzt werden.
+Aktuelle typische Ports:
 
-Da die Weboberfläche Steuerfunktionen bereitstellt, sollte der Netzwerkzugriff nur in einer vertrauenswürdigen Umgebung freigegeben werden.
+```text
+8080  Report Web
+8081  Service Admin Controller auf PROD
+8082  Service Admin Agent auf DEV
+9000  QuestDB
+9001  PacketTap TCP Receiver
+```
+
+Der Service Admin besitzt Steuerfunktionen und sollte ausschließlich in einem vertrauenswürdigen lokalen Netzwerk betrieben werden. Der Controller verwendet HTTP-Basic-Authentifizierung; die Agent-Kommunikation verwendet einen Bearer-Token. Beide Zugangsdaten werden ausschließlich in lokalen, nicht versionierten Konfigurationsdateien gespeichert.
 
 ## Getestete Erfassungswege
 
@@ -300,7 +448,9 @@ Da die Weboberfläche Steuerfunktionen bereitstellt, sollte der Netzwerkzugriff 
 - angepasste MeshCore-Flow/PacketTap-Firmware
 - PacketTap TCP Receiver
 - Capture-Dateien plus `packettap_importer.py`
-- Windows getestet
+- Windows-Dienstbetrieb getestet
+- getrennte DEV-/PROD-QuestDB
+- zentrale Dienststeuerung über `admin_server.py`
 
 ### TCP Companion
 
@@ -311,6 +461,31 @@ Da die Weboberfläche Steuerfunktionen bereitstellt, sollte der Netzwerkzugriff 
 - RSSI/SNR erfolgreich übernommen
 - passive ADVERT- und DISCOVER_RESP-Beobachtungen gespeichert
 - eigener Standort aus `APPSTART` geografisch aufgelöst
+
+## Repository und lokale Dateien
+
+Nicht ins Repository gehören insbesondere:
+
+```text
+report_config.json
+admin_config.json
+state/
+logs/
+reports/
+packettap_capture.bin
+packettap_capture.log
+packettap_stream.bin
+public_channel_keys.json
+service/*.xml
+service/*.exe
+```
+
+Versioniert werden dagegen die reproduzierbaren Beispiele:
+
+```text
+admin_config.example.json
+service/*.example.xml
+```
 
 ## Weitere Dokumentation
 

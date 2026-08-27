@@ -2,7 +2,7 @@
   "mode": "agent",
   "web_host": "0.0.0.0",
   "web_port": 8082,
-  "agent_token": "b234567891234567890ab12345678901",
+  "agent_token": "Add service admin for PROD and DEV",
   "action_timeout": 25,
   "services": {
     "questdb": {
