@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MeshCore PacketTap Web UI v0.86
+MeshCore PacketTap Web UI v0.87
 ====================================
 
 Kleine plattformunabhängige Weboberfläche für repeater_report.py.
@@ -71,7 +71,7 @@ else:
     import mesh_report as mr
 
 
-APP_VERSION = "0.86"
+APP_VERSION = "0.87"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "report_config.json"
 MAP_DIR = BASE_DIR / "map"
@@ -1426,7 +1426,8 @@ def save_preview_html(
     return destination
 
 
-def find_pdf_browser() -> Path | None:
+def find_pdf_browsers() -> list[Path]:
+    """Return all usable Edge/Chrome/Chromium executables in preferred order."""
     candidates: list[Path] = []
 
     for executable in ("msedge", "chrome", "chromium"):
@@ -1435,10 +1436,10 @@ def find_pdf_browser() -> Path | None:
             candidates.append(Path(found))
 
     if sys.platform.startswith("win"):
-        env_candidates = [
-            Path(os.environ.get("PROGRAMFILES(X86)", "")) /
-            "Microsoft/Edge/Application/msedge.exe",
+        candidates.extend([
             Path(os.environ.get("PROGRAMFILES", "")) /
+            "Microsoft/Edge/Application/msedge.exe",
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) /
             "Microsoft/Edge/Application/msedge.exe",
             Path(os.environ.get("LOCALAPPDATA", "")) /
             "Microsoft/Edge/Application/msedge.exe",
@@ -1446,49 +1447,114 @@ def find_pdf_browser() -> Path | None:
             "Google/Chrome/Application/chrome.exe",
             Path(os.environ.get("PROGRAMFILES(X86)", "")) /
             "Google/Chrome/Application/chrome.exe",
-        ]
-        candidates.extend(env_candidates)
+            Path(os.environ.get("LOCALAPPDATA", "")) /
+            "Google/Chrome/Application/chrome.exe",
+        ])
+
+    result: list[Path] = []
+    seen: set[str] = set()
 
     for candidate in candidates:
-        if candidate and candidate.is_file():
-            return candidate
-    return None
+        if not candidate:
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+
+        key = (
+            str(resolved).lower()
+            if sys.platform.startswith("win")
+            else str(resolved)
+        )
+        if key in seen:
+            continue
+        if resolved.is_file():
+            seen.add(key)
+            result.append(resolved)
+
+    return result
+
+
+def find_pdf_browser() -> Path | None:
+    """Compatibility helper for callers that only expect one browser."""
+    browsers = find_pdf_browsers()
+    return browsers[0] if browsers else None
+
+
+def _check_pdf_preview_url(preview_url: str) -> None:
+    """Fail early when the generated local preview is not reachable."""
+    try:
+        request = urllib.request.Request(
+            preview_url,
+            headers={"User-Agent": "MeshCore-PacketTap-PDF-Check"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status = int(getattr(response, "status", 200))
+            if not 200 <= status < 300:
+                raise RuntimeError(f"HTTP {status}")
+    except Exception as exc:
+        raise RuntimeError(
+            "PDF-Preview ist über den lokalen Webserver nicht erreichbar: "
+            f"{preview_url} ({exc})"
+        ) from exc
+
+
+def _wait_for_stable_pdf(
+    destination: Path,
+    timeout_seconds: float = 20.0,
+) -> bool:
+    """Wait until a non-empty PDF exists and its size has stabilized."""
+    deadline = time.time() + timeout_seconds
+    last_size = -1
+    stable_checks = 0
+
+    while time.time() < deadline:
+        try:
+            if destination.is_file():
+                size = destination.stat().st_size
+                if size > 0:
+                    if size == last_size:
+                        stable_checks += 1
+                    else:
+                        last_size = size
+                        stable_checks = 0
+
+                    if stable_checks >= 2:
+                        return True
+        except OSError:
+            pass
+
+        time.sleep(0.2)
+
+    return False
 
 
 def generate_preview_pdf_temp(
     config: dict[str, Any],
     token: str,
 ) -> tuple[Path, str, Path]:
-    """Generate a PDF in a temporary directory for immediate browser download."""
+    """Generate a PDF with Edge/Chrome fallback and detailed diagnostics."""
     _, meta = load_preview(token)
     source_name = str(meta.get("filename") or f"report-{token}.html")
     pdf_name = str(Path(source_name).with_suffix(".pdf"))
 
-    browser = find_pdf_browser()
-    if browser is None:
+    browsers = find_pdf_browsers()
+    if not browsers:
         raise RuntimeError(
-            "Für PDF wurde weder Microsoft Edge noch Google Chrome gefunden."
+            "Für PDF wurde weder Microsoft Edge noch "
+            "Google Chrome/Chromium gefunden."
         )
 
-    # Use stable project-local paths. This mirrors the standalone Python
-    # test that reliably generated PDFs on the production host.
     pdf_temp_base = BASE_DIR / "state" / "pdf_tmp"
     pdf_temp_base.mkdir(parents=True, exist_ok=True)
 
-    # Each PDF job gets its own Edge profile. Reusing one persistent profile
-    # can cause a later Edge invocation to attach to a still-running background
-    # process and return 0 without actually executing --print-to-pdf.
     profile_base = BASE_DIR / "state" / "edge_pdf_profiles"
     profile_base.mkdir(parents=True, exist_ok=True)
 
     job_id = uuid.uuid4().hex
-    user_data_dir = profile_base / job_id
-    user_data_dir.mkdir(parents=True, exist_ok=True)
-
     unique_name = f"{job_id}_{pdf_name}"
     destination = pdf_temp_base / unique_name
-
-    # Callers only need the generated file; profiles are cleaned lazily.
     temp_root = pdf_temp_base
 
     # Remove stale per-job browser profiles from earlier PDF runs.
@@ -1497,7 +1563,6 @@ def generate_preview_pdf_temp(
         for old_profile in profile_base.iterdir():
             if (
                 old_profile.is_dir()
-                and old_profile != user_data_dir
                 and old_profile.stat().st_mtime < profile_cutoff
             ):
                 shutil.rmtree(old_profile, ignore_errors=True)
@@ -1506,102 +1571,148 @@ def generate_preview_pdf_temp(
 
     port = int(config.get("web_port", 8080))
     preview_url = (
-        f"http://127.0.0.1:{port}/preview-files/{urllib.parse.quote(token)}.html"
+        f"http://127.0.0.1:{port}/preview-files/"
+        f"{urllib.parse.quote(token)}.html"
     )
 
-    command = [
-        str(browser),
-        "--headless=new",
-        "--disable-gpu",
-        "--no-pdf-header-footer",
-        "--run-all-compositor-stages-before-draw",
-        "--virtual-time-budget=5000",
-        "--no-first-run",
-        "--no-default-browser-check",
-        f"--user-data-dir={user_data_dir}",
-        f"--print-to-pdf={destination}",
-        preview_url,
-    ]
+    # Separate local preview/server failures from browser-render failures.
+    _check_pdf_preview_url(preview_url)
+
+    failures: list[str] = []
 
     # ThreadingHTTPServer may receive more than one PDF request at once.
-    # Serialize the actual browser render operation and give each job its own
-    # profile so Mesh, Neighbor and Repeater exports behave identically.
+    # Serialize the actual browser render operation. Each browser attempt gets
+    # its own profile so a failed Edge run cannot poison the Chrome fallback.
     with PDF_RENDER_LOCK:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=45,
-        )
-
-        # Edge/Chromium can return from the launcher before the PDF renderer
-        # has actually finished writing the file. Wait for the file to appear
-        # and for its size to become stable before deciding success/failure.
-        deadline = time.time() + 20.0
-        last_size = -1
-        stable_checks = 0
-        pdf_ok = False
-
-        while time.time() < deadline:
+        for browser_index, browser in enumerate(browsers, start=1):
             try:
-                if destination.is_file():
-                    size = destination.stat().st_size
-                    if size > 0:
-                        if size == last_size:
-                            stable_checks += 1
-                        else:
-                            stable_checks = 0
-                            last_size = size
-
-                        if stable_checks >= 2:
-                            pdf_ok = True
-                            break
+                destination.unlink(missing_ok=True)
             except OSError:
                 pass
 
-            time.sleep(0.2)
+            user_data_dir = profile_base / f"{job_id}-{browser_index}"
+            user_data_dir.mkdir(parents=True, exist_ok=True)
 
-    if not pdf_ok:
-        detail = (result.stdout or "").strip()
-        debug_lines = [
-            "PDF-Erzeugung fehlgeschlagen.",
-            f"Browser: {browser}",
-            f"Preview-URL: {preview_url}",
-            f"Ziel: {destination}",
-            f"Edge-Profil: {user_data_dir}",
-            f"Returncode: {result.returncode}",
-            f"PDF vorhanden: {destination.is_file()}",
-        ]
-        try:
-            debug_lines.append(
-                f"PDF-Größe: {destination.stat().st_size if destination.is_file() else 0} Byte"
-            )
-        except OSError as exc:
-            debug_lines.append(f"PDF-Größe nicht lesbar: {exc}")
+            command = [
+                str(browser),
+                "--headless=new",
+                "--disable-gpu",
+                "--no-pdf-header-footer",
+                "--run-all-compositor-stages-before-draw",
+                "--virtual-time-budget=5000",
+                "--no-first-run",
+                "--no-default-browser-check",
+                f"--user-data-dir={user_data_dir}",
+                f"--print-to-pdf={destination}",
+                preview_url,
+            ]
 
-        if detail:
-            debug_lines.append("Browser-Ausgabe: " + detail)
+            try:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=45,
+                )
 
-        debug_text = " | ".join(debug_lines)
-        print("[PDF] " + debug_text, flush=True)
+                pdf_ok = _wait_for_stable_pdf(destination)
+                if pdf_ok:
+                    size = destination.stat().st_size
+                    print(
+                        "[PDF] Erfolgreich: "
+                        f"{destination} ({size} Byte) "
+                        f"via {browser} profile={user_data_dir} "
+                        f"returncode={result.returncode}",
+                        flush=True,
+                    )
+                    return destination, pdf_name, temp_root
 
-        try:
-            destination.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise RuntimeError(debug_text)
+                detail = (result.stdout or "").strip()
+                try:
+                    pdf_size = (
+                        destination.stat().st_size
+                        if destination.is_file()
+                        else 0
+                    )
+                except OSError:
+                    pdf_size = 0
 
-    print(
-        "[PDF] Erfolgreich: "
-        f"{destination} ({destination.stat().st_size} Byte) "
-        f"via {browser} profile={user_data_dir} returncode={result.returncode}",
-        flush=True,
+                failure = (
+                    f"Browser: {browser} | "
+                    f"Profil: {user_data_dir} | "
+                    f"Returncode: {result.returncode} | "
+                    f"PDF vorhanden: {destination.is_file()} | "
+                    f"PDF-Größe: {pdf_size} Byte"
+                )
+                if detail:
+                    failure += f" | Browser-Ausgabe: {detail}"
+                failures.append(failure)
+
+            except subprocess.TimeoutExpired as exc:
+                output = exc.stdout or ""
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+
+                failure = (
+                    f"Browser: {browser} | "
+                    f"Profil: {user_data_dir} | "
+                    "Timeout nach 45 Sekunden"
+                )
+                if str(output).strip():
+                    failure += (
+                        f" | Browser-Ausgabe: {str(output).strip()}"
+                    )
+                failures.append(failure)
+
+            except Exception as exc:
+                failures.append(
+                    f"Browser: {browser} | "
+                    f"Profil: {user_data_dir} | "
+                    f"Start-/Renderfehler: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+            finally:
+                # Best-effort cleanup. A Chromium subprocess may briefly keep
+                # profile files open after the launcher exits.
+                for _ in range(5):
+                    try:
+                        shutil.rmtree(
+                            user_data_dir,
+                            ignore_errors=False,
+                        )
+                        break
+                    except OSError:
+                        time.sleep(0.2)
+
+                if user_data_dir.exists():
+                    shutil.rmtree(
+                        user_data_dir,
+                        ignore_errors=True,
+                    )
+
+    try:
+        destination.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    debug_lines = [
+        "PDF-Erzeugung fehlgeschlagen.",
+        f"Preview-URL: {preview_url}",
+        f"Ziel: {destination}",
+        f"Versuchte Browser: {len(browsers)}",
+    ]
+    debug_lines.extend(
+        f"Versuch {index}: {failure}"
+        for index, failure in enumerate(failures, start=1)
     )
 
-    return destination, pdf_name, temp_root
+    debug_text = " | ".join(debug_lines)
+    print("[PDF] " + debug_text, flush=True)
+    raise RuntimeError(debug_text)
 
 
 def cleanup_previews(max_age_hours: int = 24) -> None:
